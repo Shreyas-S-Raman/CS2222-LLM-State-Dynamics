@@ -132,7 +132,7 @@ class EvaluationPipeline:
 
 if __name__ == '__main__':
     pdb.set_trace()
-    
+
     #num states range
     min_states = 1
     max_states = 100
@@ -150,6 +150,16 @@ if __name__ == '__main__':
 
     #name of model
     model_name = 'pythia-70m'
+    '''
+    https://transformerlensorg.github.io/TransformerLens/generated/model_properties_table.html?utm_source=chatgpt.com
+    Range of values to try:
+    GPT2: gpt2-small, gpt2-medium, gpt2-large, gpt2-xl
+    OPT: facebook/opt-125m, facebook/opt-2.7b, facebook/opt-13b
+    TinyStories: "tiny-stories-1M", "tiny-stories-3M", tiny-stories-28M
+    Pythia: pythia-14m, pythia-70m, pythia-1.4b
+    LLaMa: llama-7b, llama-13b, llama-30b
+    T5: t5-small, t5-base, t5-large
+    '''
 
     BASE_PATH = os.path.relpath(f'./{model_name}')
     if not os.path.exists(BASE_PATH):
