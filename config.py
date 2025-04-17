@@ -1,0 +1,4 @@
+from sequence_generator import RandomLetterSequenceGenerator, DFAStateActionSequenceGenerator, DFAStateSequenceGenerator, DFAPDDLSequenceGenerator
+
+class Config:
+    sequence_generator = RandomLetterSequenceGenerator
