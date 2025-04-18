@@ -1,8 +1,11 @@
 import random
 import string
 import networkx as nx
+import warnings
+warnings.filterwarnings("ignore", message="networkx backend defined more than once")
 import matplotlib.pyplot as plt
 from abc import ABC, abstractmethod
+import pdb
 
 class SequenceGenerator(ABC):
     def __init__(self):
@@ -19,31 +22,38 @@ class SequenceGenerator(ABC):
 
 
 class RandomLetterSequenceGenerator(SequenceGenerator):
-    def __init__(self, length:int=None, repeat_pattern_len:int=None, end_idx:int=None):
+    def __init__(self, length:int=None, repeat_pattern_len:int=None, end_idx:int=None, randomize:bool=False):
         super().__init__()
+        self.randomize = randomize
         self.length = length
         self.repeat_pattern_len = repeat_pattern_len
         self.end_idx = end_idx
-        assert self.end_idx < self.repeat_pattern_len, "ERROR: end_idx must be less than repeat_pattern_len"
+        assert self.end_idx < self.repeat_pattern_len if end_idx else True, "ERROR: end_idx must be less than repeat_pattern_len"
 
-    def generate(self, length, repeat_pattern_len):
+    def generate(self, seq_len:int=None, repeat_pattern_len:int=None):
+        #NOTE: edges = seq_len / length | states = repeat_pattern_len
         repeat_pattern_len = repeat_pattern_len if self.repeat_pattern_len is None else self.repeat_pattern_len
-        length = length if self.length is None else self.length
+        length = seq_len if self.length is None else self.length
         base_pattern = random.choices(string.ascii_lowercase, k=repeat_pattern_len)
-        repeats = (length) // repeat_pattern_len
+        repeats = max((length) // repeat_pattern_len,1)
 
         pattern = base_pattern * repeats
+
         if self.end_idx is not None and self.end_idx > 0:
             pattern += base_pattern[:self.end_idx]
-        else:
+        elif self.randomize:
             end_idx = random.choice(range(0,repeat_pattern_len))
             pattern += base_pattern[:end_idx]
+        elif repeat_pattern_len > length:
+            end_idx = length
+            pattern = pattern[:end_idx]
 
         # Final sequence of desired length
         sequence = pattern[:length]
 
         # Find index of the last character in base_pattern
         last_char = sequence[-1]
+        
         try:
             last_idx = base_pattern.index(last_char)
         except ValueError:
@@ -52,8 +62,10 @@ class RandomLetterSequenceGenerator(SequenceGenerator):
         # Wrap-around next token
         label = base_pattern[(last_idx + 1) % len(base_pattern)]
 
-        return ''.join(sequence), label
-
+        return ' '.join(sequence), ' '+label
+    
+    def visualize_dfa(self):
+        pass
 
 class DFAStateActionSequenceGenerator(SequenceGenerator):
     def __init__(self, dfa=None, num_states:int=2, num_edges:int=1, num_unique_actions:int=1, max_sink_nodes:int=1, start_state:str=None):
@@ -61,7 +73,7 @@ class DFAStateActionSequenceGenerator(SequenceGenerator):
 
         assert num_edges <= (factorial(num_states))/(2*factorial(num_states-2)), "ERROR: cannot have more edges than maximally possible between all nodes"
         assert num_edges >= num_states - 1, "ERROR: there must be an edge at least between every state to ensure no state isolated"
-        assert max_sink_nodes < num_states, "ERROR: number of sink nodes cannot be more than all nodes"
+        assert max_sink_nodes <= num_states, "ERROR: number of sink nodes cannot be more than all nodes"
 
         self.dfa = dfa if dfa is not None else self._create_dfa(num_states=num_states, num_edges=num_edges, num_unique_actions=num_unique_actions, max_sink_nodes=max_sink_nodes)
 
@@ -93,7 +105,7 @@ class DFAStateActionSequenceGenerator(SequenceGenerator):
         sequence.append(rand_action)
         label = self.dfa[curr_state][rand_action]
 
-        return ''.join(sequence), label
+        return ' '.join(sequence), ' '+label
 
     def visualize_dfa(self):
         G = nx.DiGraph()
@@ -133,7 +145,7 @@ class DFAStateActionSequenceGenerator(SequenceGenerator):
 
         #assign relevant actions to each edge
         distributed_edges = self._distribute_edges(num_edges=num_edges, num_states=num_states, max_sink_nodes=max_sink_nodes)
-        self.dfa = {} #{s1: {action: s2}}
+        dfa = {} #{s1: {action: s2}}
 
         for i, num_out_edges in enumerate(distributed_edges):
 
@@ -141,15 +153,14 @@ class DFAStateActionSequenceGenerator(SequenceGenerator):
             sampled_actions = random.sample(self.actions, num_out_edges)
             sampled_states = random.sample(self.states, num_out_edges)
             
-            self.dfa[self.states[i]] = {a:s for (a,s) in zip(sampled_actions, sampled_states)}
+            dfa[self.states[i]] = {a:s for (a,s) in zip(sampled_actions, sampled_states)}
+        return dfa
     
     def _distribute_edges(self, num_edges: int, num_states: int, max_sink_nodes: int):
         if num_states <= 0:
             raise ValueError("Number of states must be positive.")
         if num_edges < 0:
             raise ValueError("Number of edges must be non-negative.")
-        if max_sink_nodes >= num_states:
-            raise ValueError("max_sink_nodes must be less than num_states.")
 
         # Step 1: Randomly select number of sink nodes (up to max)
         num_sinks = random.randint(1, max_sink_nodes)
@@ -183,8 +194,8 @@ class DFAPDDLSequenceGenerator(SequenceGenerator):
         super().__init__()
         assert num_edges <= (factorial(num_states)) / (2 * factorial(num_states - 2)), "Too many edges"
         assert num_edges >= num_states - 1, "ERROR: there must be an edge at least between every state to ensure no state isolated"
-        assert max_sink_nodes < num_states, "Too many sink nodes"
-
+        assert max_sink_nodes <= num_states, "ERROR: number of sink nodes cannot be more than all nodes"
+        
         self.state_vars = {f"flag_{i}": random.choice([0, 1]) for i in range(3)}  # binary state variables
         self.action_definitions = {}  # action -> {'pre': ..., 'eff': ...}
 
@@ -213,10 +224,8 @@ class DFAPDDLSequenceGenerator(SequenceGenerator):
             action = random.choice(valid_actions)
 
             # Log state_vars and action before effect
-            sequence.append({
-                'state_vars': self.state_vars.copy(),
-                'action': action
-            })
+            sequence.append(str(self.state_vars.copy()))
+            sequence.append(action)
 
             # Compute label as the next state
             label = transitions[action]
@@ -226,7 +235,9 @@ class DFAPDDLSequenceGenerator(SequenceGenerator):
             curr_state = label
             num_steps += 1
 
-        return sequence, label
+        
+
+        return ' '.join(sequence), ' ' +str(label)
 
     def _check_preconditions(self, action):
         return all(self.state_vars.get(k, 0) == v for k, v in self.action_definitions[action]['pre'].items())
@@ -309,7 +320,7 @@ class DFAStateSequenceGenerator(SequenceGenerator):
         super().__init__()
 
         assert num_edges <= (factorial(num_states))/(2*factorial(num_states-2)), "ERROR: cannot have more edges than maximally possible between all nodes"
-        assert max_sink_nodes < num_states, "ERROR: number of sink nodes cannot be more than all nodes"
+        assert max_sink_nodes <= num_states, "ERROR: number of sink nodes cannot be more than all nodes"
 
         self.dfa = dfa if dfa is not None else self._create_dfa(num_states=num_states, num_edges=num_edges, max_sink_nodes=max_sink_nodes)
 
@@ -334,7 +345,7 @@ class DFAStateSequenceGenerator(SequenceGenerator):
                 break
             
         labels = self.dfa[curr_state]
-        return ''.join(sequence), labels
+        return ' '.join(sequence), ' '+labels
 
     def _create_dfa(self, num_states:int, num_edges:int, max_sink_nodes:int):
 
@@ -349,21 +360,22 @@ class DFAStateSequenceGenerator(SequenceGenerator):
 
         #assign relevant actions to each edge
         distributed_edges = self._distribute_edges(num_edges=num_edges, num_states=num_states, max_sink_nodes=max_sink_nodes)
-        self.dfa = {} #{s1: set{s2}}
+        dfa = {} #{s1: set{s2}}
 
 
         for i, num_out_edges in enumerate(distributed_edges):
 
             sampled_states = random.sample(self.states, num_out_edges)
 
-            self.dfa[self.states[i]] = set([s for s in sampled_states])
+            dfa[self.states[i]] = set([s for s in sampled_states])
+        return dfa
     
     def _distribute_edges(self, num_edges: int, num_states: int, max_sink_nodes: int):
         if num_states <= 0:
             raise ValueError("Number of states must be positive.")
         if num_edges < 0:
             raise ValueError("Number of edges must be non-negative.")
-        if max_sink_nodes >= num_states:
+        if max_sink_nodes <= num_states:
             raise ValueError("max_sink_nodes must be less than num_states.")
 
         # Step 1: Randomly select number of sink nodes (up to max)
@@ -412,4 +424,4 @@ class DFAStateSequenceGenerator(SequenceGenerator):
         plt.show()
 
 def factorial(n: int):
-    return 1 if n in (0, 1) else n *factorial(n - 1)
+    return 1 if n <= 1 else n *factorial(n - 1)
