@@ -1,6 +1,6 @@
 import argparse
 from config import Config
-from your_module import (
+from evaluation import (
     evaluate_random_sequence,
     evaluate_dfa_stateaction_sequence,
     evaluate_dfa_statestate_sequence
