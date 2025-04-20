@@ -5,7 +5,7 @@ import transformer_lens.utils as utils
 import circuitsvis as cv
 from config import Config
 import plotly.express as px
-from sequence_generator import SequenceGenerator,RandomLetterSequenceGenerator, DFAStateActionSequenceGenerator, DFAStateSequenceGenerator, DFAPDDLSequenceGenerator
+from sequence_generator import SequenceGenerator,RandomLetterSequenceGenerator, DFAStateActionSequenceGenerator, DFAStateSequenceGenerator
 import json
 import pickle
 import os
@@ -407,49 +407,6 @@ if __name__ == '__main__':
     LLaMa: llama-7b, llama-13b, llama-30b [DOESN'T WORK DIRECTLY]
     T5: t5-small, t5-base, t5-large
     '''
-    
-    # evaluate_random_sequence(
-    #                 model_name=model_name, 
-    #                 num_samples=num_samples, 
-    #                 init_states=init_states, 
-    #                 init_transitions=init_transitions, 
-    #                 max_states=max_states, 
-    #                 min_states=min_states, 
-    #                 state_interval=state_interval, 
-    #                 max_transitions=max_transitions, 
-    #                 min_transitions=min_transitions, 
-    #                 transition_interval=transition_interval
-    #             )
-    
-    # evaluate_dfa_stateaction_sequence(
-    #                 model_name=model_name, 
-    #                 num_samples=num_samples, 
-    #                 init_states=init_states, 
-    #                 init_transitions=init_transitions, 
-    #                 max_states=max_states, 
-    #                 min_states=min_states, 
-    #                 state_interval=state_interval, 
-    #                 max_transitions=max_transitions, 
-    #                 min_transitions=min_transitions, 
-    #                 transition_interval=transition_interval,
-    #                 density_interval = density_interval
-    #             )
-    
-    # evaluate_dfa_statestate_sequence(
-    #                 model_name=model_name, 
-    #                 num_samples=num_samples, 
-    #                 init_states=init_states, 
-    #                 init_transitions=init_transitions, 
-    #                 max_states=max_states, 
-    #                 min_states=min_states, 
-    #                 state_interval=state_interval, 
-    #                 max_transitions=max_transitions, 
-    #                 min_transitions=min_transitions, 
-    #                 transition_interval=transition_interval,
-    #                 density_interval = density_interval,
-    #                 reduce_states = False
-    #             )
-
 
 
    

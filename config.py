@@ -1,4 +1,3 @@
-from sequence_generator import RandomLetterSequenceGenerator, DFAStateActionSequenceGenerator, DFAStateSequenceGenerator, DFAPDDLSequenceGenerator
 import os
 from dotenv import load_dotenv
 
@@ -8,7 +7,7 @@ os.environ["HF_TOKEN"] = hf_key
 
 class Config:
     #base arguments overriden in evaluate_model.py
-    reduced_states = False
+    reduce_states = False
     model_name = 'pythia-14m'
     BASE_PATH = None
 
