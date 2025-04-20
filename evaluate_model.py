@@ -5,6 +5,7 @@ from evaluation import (
     evaluate_dfa_stateaction_sequence,
     evaluate_dfa_statestate_sequence
 )
+import os
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

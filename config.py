@@ -17,8 +17,8 @@ class Config:
     max_states = 110
     state_interval = 10
     #transition range
-    init_transitions = [1,2,3,4,5,6,7,8,9] if not reduce_states else [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]
-    init_transitions = 10 if not reduce_states else 110
+    init_transitions = [1,2,3,4,5,6,7,8,9]
+    min_transitions = 10
     max_transitions = 110
     transition_interval = 10
     #density interval
