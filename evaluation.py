@@ -7,6 +7,7 @@ from config import Config
 import plotly.express as px
 from sequence_generator import SequenceGenerator,RandomLetterSequenceGenerator, DFAStateActionSequenceGenerator, DFAStateSequenceGenerator, DFAPDDLSequenceGenerator
 import json
+import pickle
 import os
 from mpl_toolkits.mplot3d import Axes3D
 import matplotlib.pyplot as plt
@@ -28,7 +29,7 @@ class EvaluationPipeline:
         )
         self.seq_generator = sequence_generator
 
-    def generate_and_classify_accuracy(self, num_samples:int=10, seq_len:int=10, detail=True, verbose=False):
+    def generate_and_classify_accuracy(self, num_samples:int=10, seq_len:int=10, detail=True, verbose=True):
         correct = 0
         correct_per_sample = []
         sequences = []
@@ -46,8 +47,6 @@ class EvaluationPipeline:
             probs = torch.nn.functional.softmax(logits, dim=-1)[0, -1, :]
             pred_label = torch.argmax(probs, axis=-1)
             next_token = self.model.to_string(pred_label)
-            if verbose:
-                print('Sequence: ', sequence, 'Label: ', label, 'Pred: ', next_token)
 
             true_label = self.model.to_tokens(label, prepend_bos=False)
             true_label = torch.squeeze(true_label)
@@ -56,7 +55,8 @@ class EvaluationPipeline:
                 correct_per_sample.append(True)
             else:
                 correct_per_sample.append(False)
-        
+        if verbose:
+            print('Sequence: ', sequence, 'Label: ', label, 'Pred: ', next_token)
         dfas = [self.seq_generator.dfa if 'dfa' in dir(self.seq_generator) else None for _ in range(num_samples)]
         return correct / num_samples, correct_per_sample, sequences, labels, dfas
 
@@ -132,7 +132,7 @@ class EvaluationPipeline:
         log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
         return logits, log_probs
 
-def evaluate_dfa_stateaction_sequence(model_name:str, num_samples:int, init_states:list, init_transitions:list, max_states:int, min_states:int, state_interval:int, max_transitions:int, min_transitions:int, transition_interval:int, density_interval:int):
+def evaluate_dfa_stateaction_sequence(model_name:str, num_samples:int, init_states:list, init_transitions:list, max_states:int, min_states:int, state_interval:int, max_transitions:int, min_transitions:int, transition_interval:int, density_interval:int, reduce_states: bool=False):
      #tracking correct and incorrect outputs
     correct_output = {}
     incorrect_output = {}
@@ -145,7 +145,7 @@ def evaluate_dfa_stateaction_sequence(model_name:str, num_samples:int, init_stat
                 
             max_density = max(1, state*(state-1)//2 + 1)
             
-            for k, density in enumerate([state+1, int((state+max_density)//2), max_density]):
+            for k, density in enumerate([state, int((state+max_density)//2), max_density]):
                 if state not in correct_output:
                     correct_output[state] = {}
                 if trans not in correct_output[state]:
@@ -169,7 +169,8 @@ def evaluate_dfa_stateaction_sequence(model_name:str, num_samples:int, init_stat
                                 num_states=state, 
                                 num_edges=density,
                                 num_unique_actions=400,
-                                max_sink_nodes=1 if state > 1 else 0
+                                max_sink_nodes=1,
+                                reduce_states = reduce_states
                                 )
                 eval_pipeline = EvaluationPipeline(model_name=model_name, sequence_generator=seq_generator)
                 
@@ -233,9 +234,8 @@ def evaluate_dfa_stateaction_sequence(model_name:str, num_samples:int, init_stat
 
     np.savez(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'accuracy_dfastateaction.npz'), array=accuracy_heatmap)
 
-
-def evaluate_dfa_statestate_sequence(model_name:str, num_samples:int, init_states:list, init_transitions:list, max_states:int, min_states:int, state_interval:int, max_transitions:int, min_transitions:int, transition_interval:int, density_interval:int):
-     #tracking correct and incorrect outputs
+def evaluate_dfa_statestate_sequence(model_name:str, num_samples:int, init_states:list, init_transitions:list, max_states:int, min_states:int, state_interval:int, max_transitions:int, min_transitions:int, transition_interval:int, density_interval:int, reduce_states: bool=False):
+    #tracking correct and incorrect outputs
     correct_output = {}
     incorrect_output = {}
     dfa_output = {}
@@ -246,7 +246,7 @@ def evaluate_dfa_statestate_sequence(model_name:str, num_samples:int, init_state
         for j, trans in enumerate(init_transitions + list(range(min_transitions, max_transitions, transition_interval))):
                 
             max_density = max(1, state*(state-1)//2 + 1)
-
+            
             for k, density in enumerate([state, int((state+max_density)//2), max_density]):
                 if state not in correct_output:
                     correct_output[state] = {}
@@ -267,13 +267,17 @@ def evaluate_dfa_statestate_sequence(model_name:str, num_samples:int, init_state
                 if density not in dfa_output[state][trans]:
                     dfa_output[state][trans][density] = []
                 
-                seq_generator = DFAStateSequenceGenerator(num_states=state, num_edges=density)
+                seq_generator = DFAStateSequenceGenerator(
+                                num_states=state, 
+                                num_edges=density,
+                                max_sink_nodes=1,
+                                reduce_states = reduce_states
+                                )
                 eval_pipeline = EvaluationPipeline(model_name=model_name, sequence_generator=seq_generator)
                 
                 acc, correct_per_sample, sequences, labels, dfas = eval_pipeline.generate_and_classify_accuracy(num_samples=num_samples, seq_len=trans)
                 
                 for (correct,s,l, d) in zip(correct_per_sample, sequences, labels, dfas):
-                    
                     if correct:
                         correct_output[state][trans][density].append([s, l])
                     else:
@@ -281,6 +285,7 @@ def evaluate_dfa_statestate_sequence(model_name:str, num_samples:int, init_state
                     dfa_output[state][trans][density].append(d)
                 accuracy_heatmap[i][j][k] = acc
                 print(f"STATE {state} | TRANS {trans} | DENSITY {density} | ACCURACY: {acc*100}%")
+                
     
     #save all the outputs and heatmaps
     os.mkdir(os.path.join(Config.BASE_PATH, 'dfa_statestate'))
@@ -288,8 +293,8 @@ def evaluate_dfa_statestate_sequence(model_name:str, num_samples:int, init_state
         json.dump(correct_output, f, indent=4)
     with open(os.path.join(Config.BASE_PATH, 'dfa_statestate', 'incorrect_dfa_statestate.json'), 'w') as f:
         json.dump(incorrect_output, f, indent=4)
-    with open(os.path.join(Config.BASE_PATH, 'dfa_statestate', 'dfa_statestate.json'), 'w') as f:
-        json.dump(dfa_output, f, indent=4)
+    with open(os.path.join(Config.BASE_PATH, 'dfa_statestate', 'dfa_statestate.pkl'), 'w') as f:
+        pickle.dump(data, f)
    
     # Get the shape of the heatmap
     num_states, num_transitions, density_intervals = accuracy_heatmap.shape
@@ -326,8 +331,8 @@ def evaluate_dfa_statestate_sequence(model_name:str, num_samples:int, init_state
         # Save the plot
         plt.savefig(os.path.join(Config.BASE_PATH, 'dfa_statestate', f"accuracy_dfa_statestate_density_{density}.png"), dpi=300)
         plt.close()
-    
-    np.savez(os.path.join(Config.BASE_PATH, 'dfa_statestate', 'accuracy_dfa_statestate.npz'), array=accuracy_heatmap)
+
+    np.savez(os.path.join(Config.BASE_PATH, 'dfa_statestate', 'accuracy_dfastatestate.npz'), array=accuracy_heatmap)
 
 def evaluate_random_sequence(model_name:str, num_samples:int, init_states:list, init_transitions:list, max_states:int, min_states:int, state_interval:int, max_transitions:int, min_transitions:int, transition_interval:int):
     #tracking correct and incorrect outputs
@@ -392,14 +397,16 @@ if __name__ == '__main__':
     pdb.set_trace()
 
     #num states range
-    init_states = [1,2,3,4,5,6,7,8,9]
+    # init_states = [1,2,3,4,5,6,7,8,9]
     init_states = []
-    min_states = 30
+    min_states = 90
     max_states = 110
     state_interval = 10
     #transition range
-    init_transitions = [1,2,3,4,5,6,7,8,9]
-    min_transitions = 10
+    # init_transitions = [1,2,3,4,5,6,7,8,9]
+    init_transitions = []
+
+    min_transitions = 80
     max_transitions = 110
     transition_interval = 10
     #density interval
@@ -435,19 +442,19 @@ if __name__ == '__main__':
     #                 transition_interval=transition_interval
     #             )
     
-    evaluate_dfa_stateaction_sequence(
-                    model_name=model_name, 
-                    num_samples=num_samples, 
-                    init_states=init_states, 
-                    init_transitions=init_transitions, 
-                    max_states=max_states, 
-                    min_states=min_states, 
-                    state_interval=state_interval, 
-                    max_transitions=max_transitions, 
-                    min_transitions=min_transitions, 
-                    transition_interval=transition_interval,
-                    density_interval = density_interval
-                )
+    # evaluate_dfa_stateaction_sequence(
+    #                 model_name=model_name, 
+    #                 num_samples=num_samples, 
+    #                 init_states=init_states, 
+    #                 init_transitions=init_transitions, 
+    #                 max_states=max_states, 
+    #                 min_states=min_states, 
+    #                 state_interval=state_interval, 
+    #                 max_transitions=max_transitions, 
+    #                 min_transitions=min_transitions, 
+    #                 transition_interval=transition_interval,
+    #                 density_interval = density_interval
+    #             )
     
     evaluate_dfa_statestate_sequence(
                     model_name=model_name, 
@@ -460,7 +467,8 @@ if __name__ == '__main__':
                     max_transitions=max_transitions, 
                     min_transitions=min_transitions, 
                     transition_interval=transition_interval,
-                    density_interval = density_interval
+                    density_interval = density_interval,
+                    reduce_states = False
                 )
 
 
