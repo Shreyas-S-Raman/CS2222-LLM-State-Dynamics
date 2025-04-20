@@ -16,10 +16,10 @@ source ~/.bashrc
 source cs2222/bin/activate
 echo "SLURM_ARRAY_JOB_ID: $SLURM_ARRAY_JOB_ID"
 
-model='tiny-stories-3M'
+model='pythia-70m'
 echo "RUNNING ${model}"
 
-python3 evaluate_model.py --model_name $model -r
+python3 evaluate_model.py --model_name $model
 echo "FINISHED RUNNING ${model}$"
 
 # https://transformerlensorg.github.io/TransformerLens/generated/model_properties_table.html?utm_source=chatgpt.com
@@ -31,6 +31,7 @@ echo "FINISHED RUNNING ${model}$"
 # LLaMa: llama-7b, llama-13b, llama-30b [DOESN'T WORK DIRECTLY]
 # T5: t5-small, t5-base, t5-large
 #DONE: 
-#Pythia: 
-#TinyStories:
+#Pythia: 14m, 70m
+#TinyStories: 1m, 3m
 #GPT2:
+#OPT: 
