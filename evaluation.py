@@ -5,8 +5,7 @@ import transformer_lens.utils as utils
 import circuitsvis as cv
 from config import Config
 import plotly.express as px
-from sequence_generator import RandomLetterSequenceGenerator, DFAStateActionSequenceGenerator, DFAStateSequenceGenerator, DFAPDDLSequenceGenerator
-from sequence_generator import factorial
+from sequence_generator import SequenceGenerator,RandomLetterSequenceGenerator, DFAStateActionSequenceGenerator, DFAStateSequenceGenerator, DFAPDDLSequenceGenerator
 import json
 import os
 from mpl_toolkits.mplot3d import Axes3D
@@ -16,6 +15,7 @@ import pandas as pd
 from matplotlib.colors import Normalize
 from matplotlib.cm import ScalarMappable, viridis
 import pdb 
+from tqdm import tqdm
 
 class EvaluationPipeline:
     def __init__(self, model_name:str, sequence_generator):
@@ -29,7 +29,6 @@ class EvaluationPipeline:
         self.seq_generator = sequence_generator
 
     def generate_and_classify_accuracy(self, num_samples:int=10, seq_len:int=10, detail=True, verbose=False):
-        # Generate sequences and classify accuracy
         correct = 0
         correct_per_sample = []
         sequences = []
@@ -58,7 +57,8 @@ class EvaluationPipeline:
             else:
                 correct_per_sample.append(False)
         
-        return correct / num_samples, correct_per_sample, sequences, labels
+        dfas = [self.seq_generator.dfa if 'dfa' in dir(self.seq_generator) else None for _ in range(num_samples)]
+        return correct / num_samples, correct_per_sample, sequences, labels, dfas
 
     def get_token_probabilities(self, seq_len:int):
         # Return probabilities of likely next tokens
@@ -83,13 +83,6 @@ class EvaluationPipeline:
         cv.attention.attention_patterns(tokens=str_tokens, attention=attention_pattern)
 
     def visualize_all_attention_heads(self, layer_idx:int, seq_len:int):
-        """
-        Visualize the attention headmap for all attention heads in a given layer.
-
-        :param cache: The activation cache containing attention patterns.
-        :param layer_idx: The index of the layer to visualize.
-        :param tokens: The input tokens for which the attention patterns were computed.
-        """
         # Retrieve the attention patterns for the specified layer
         sequence, label = self.seq_generator.generate(seq_len=seq_len)
         tokens = self.model.to_tokens(sequence, prepend_bos=True)
@@ -139,12 +132,269 @@ class EvaluationPipeline:
         log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
         return logits, log_probs
 
+def evaluate_dfa_stateaction_sequence(model_name:str, num_samples:int, init_states:list, init_transitions:list, max_states:int, min_states:int, state_interval:int, max_transitions:int, min_transitions:int, transition_interval:int, density_interval:int):
+     #tracking correct and incorrect outputs
+    correct_output = {}
+    incorrect_output = {}
+    dfa_output = {}
+    #track 3D heatmaps of accuracy for DFA state action environment
+    accuracy_heatmap = np.zeros((len(init_states)+(max_states-min_states)//state_interval, len(init_transitions) + (max_transitions-min_transitions)//transition_interval, density_interval))
+
+    for i, state in tqdm(enumerate(init_states + list(range(min_states, max_states, state_interval)))):
+        for j, trans in enumerate(init_transitions + list(range(min_transitions, max_transitions, transition_interval))):
+                
+            max_density = max(1, state*(state-1)//2 + 1)
+            
+            for k, density in enumerate([state+1, int((state+max_density)//2), max_density]):
+                if state not in correct_output:
+                    correct_output[state] = {}
+                if trans not in correct_output[state]:
+                    correct_output[state][trans] = {}
+                if density not in correct_output[state][trans]:
+                    correct_output[state][trans][density] = []
+                if state not in incorrect_output:
+                    incorrect_output[state] = {}
+                if trans not in incorrect_output[state]:
+                    incorrect_output[state][trans] = {}
+                if density not in incorrect_output[state][trans]:
+                    incorrect_output[state][trans][density] = []
+                if state not in dfa_output:
+                    dfa_output[state] = {}
+                if trans not in dfa_output[state]:
+                    dfa_output[state][trans] = {}
+                if density not in dfa_output[state][trans]:
+                    dfa_output[state][trans][density] = []
+                
+                seq_generator = DFAStateActionSequenceGenerator(
+                                num_states=state, 
+                                num_edges=density,
+                                num_unique_actions=400,
+                                max_sink_nodes=1 if state > 1 else 0
+                                )
+                eval_pipeline = EvaluationPipeline(model_name=model_name, sequence_generator=seq_generator)
+                
+                acc, correct_per_sample, sequences, labels, dfas = eval_pipeline.generate_and_classify_accuracy(num_samples=num_samples, seq_len=trans)
+                
+                for (correct,s,l, d) in zip(correct_per_sample, sequences, labels, dfas):
+                    
+                    if correct:
+                        correct_output[state][trans][density].append([s, l])
+                    else:
+                        incorrect_output[state][trans][density].append([s, l])
+                    dfa_output[state][trans][density].append(d)
+                accuracy_heatmap[i][j][k] = acc
+                print(f"STATE {state} | TRANS {trans} | DENSITY {density} | ACCURACY: {acc*100}%")
+                
+    
+    #save all the outputs and heatmaps
+    os.mkdir(os.path.join(Config.BASE_PATH, 'dfa_stateaction'))
+    with open(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'correct_dfa_stateaction.json'), 'w') as f:
+        json.dump(correct_output, f, indent=4)
+    with open(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'incorrect_dfa_stateaction.json'), 'w') as f:
+        json.dump(incorrect_output, f, indent=4)
+    with open(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'dfa_stateaction.json'), 'w') as f:
+        json.dump(dfa_output, f, indent=4)
+   
+    # Get the shape of the heatmap
+    num_states, num_transitions, density_intervals = accuracy_heatmap.shape
+
+    # Create a figure for each density interval
+    for i, density in  enumerate([0.0, 0.5, 1.0]):
+        fig, ax = plt.subplots(figsize=(8, 6))
+        
+        # Extract the 2D slice for the current density interval
+        accuracy_slice = accuracy_heatmap[:, :, i]
+        
+        # Normalize the accuracy values for color mapping
+        norm = Normalize(vmin=accuracy_slice.min(), vmax=accuracy_slice.max())
+        colors = viridis(norm(accuracy_slice))
+        
+        # Plot the heatmap
+        cax = ax.imshow(accuracy_slice, cmap=viridis, norm=norm, origin='lower')
+        
+        # Add color bar
+        cbar = fig.colorbar(cax, ax=ax, pad=0.1)
+        cbar.set_label('Accuracy')
+        
+        # Set labels and title
+        ax.set_title(f"Density Interval {density}")
+        ax.set_xlabel("Number of States")
+        ax.set_ylabel("Number of Transitions")
+        
+        # Set ticks
+        ax.set_xticks(np.arange(num_states))
+        ax.set_yticks(np.arange(num_transitions))
+        ax.set_xticklabels(np.arange(1, num_states + 1))
+        ax.set_yticklabels(np.arange(1, num_transitions + 1))
+        
+        # Save the plot
+        plt.savefig(os.path.join(Config.BASE_PATH, 'dfa_stateaction', f"accuracy_dfastateaction_density_{density}.png"), dpi=300)
+        plt.close()
+
+    np.savez(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'accuracy_dfastateaction.npz'), array=accuracy_heatmap)
+
+
+def evaluate_dfa_statestate_sequence(model_name:str, num_samples:int, init_states:list, init_transitions:list, max_states:int, min_states:int, state_interval:int, max_transitions:int, min_transitions:int, transition_interval:int, density_interval:int):
+     #tracking correct and incorrect outputs
+    correct_output = {}
+    incorrect_output = {}
+    dfa_output = {}
+    #track 3D heatmaps of accuracy for DFA state action environment
+    accuracy_heatmap = np.zeros((len(init_states)+(max_states-min_states)//state_interval, len(init_transitions) + (max_transitions-min_transitions)//transition_interval, density_interval))
+
+    for i, state in tqdm(enumerate(init_states + list(range(min_states, max_states, state_interval)))):
+        for j, trans in enumerate(init_transitions + list(range(min_transitions, max_transitions, transition_interval))):
+                
+            max_density = max(1, state*(state-1)//2 + 1)
+
+            for k, density in enumerate([state, int((state+max_density)//2), max_density]):
+                if state not in correct_output:
+                    correct_output[state] = {}
+                if trans not in correct_output[state]:
+                    correct_output[state][trans] = {}
+                if density not in correct_output[state][trans]:
+                    correct_output[state][trans][density] = []
+                if state not in incorrect_output:
+                    incorrect_output[state] = {}
+                if trans not in incorrect_output[state]:
+                    incorrect_output[state][trans] = {}
+                if density not in incorrect_output[state][trans]:
+                    incorrect_output[state][trans][density] = []
+                if state not in dfa_output:
+                    dfa_output[state] = {}
+                if trans not in dfa_output[state]:
+                    dfa_output[state][trans] = {}
+                if density not in dfa_output[state][trans]:
+                    dfa_output[state][trans][density] = []
+                
+                seq_generator = DFAStateSequenceGenerator(num_states=state, num_edges=density)
+                eval_pipeline = EvaluationPipeline(model_name=model_name, sequence_generator=seq_generator)
+                
+                acc, correct_per_sample, sequences, labels, dfas = eval_pipeline.generate_and_classify_accuracy(num_samples=num_samples, seq_len=trans)
+                
+                for (correct,s,l, d) in zip(correct_per_sample, sequences, labels, dfas):
+                    
+                    if correct:
+                        correct_output[state][trans][density].append([s, l])
+                    else:
+                        incorrect_output[state][trans][density].append([s, l])
+                    dfa_output[state][trans][density].append(d)
+                accuracy_heatmap[i][j][k] = acc
+                print(f"STATE {state} | TRANS {trans} | DENSITY {density} | ACCURACY: {acc*100}%")
+    
+    #save all the outputs and heatmaps
+    os.mkdir(os.path.join(Config.BASE_PATH, 'dfa_statestate'))
+    with open(os.path.join(Config.BASE_PATH, 'dfa_statestate', 'correct_dfa_statestate.json'), 'w') as f:
+        json.dump(correct_output, f, indent=4)
+    with open(os.path.join(Config.BASE_PATH, 'dfa_statestate', 'incorrect_dfa_statestate.json'), 'w') as f:
+        json.dump(incorrect_output, f, indent=4)
+    with open(os.path.join(Config.BASE_PATH, 'dfa_statestate', 'dfa_statestate.json'), 'w') as f:
+        json.dump(dfa_output, f, indent=4)
+   
+    # Get the shape of the heatmap
+    num_states, num_transitions, density_intervals = accuracy_heatmap.shape
+
+    # Create a figure for each density interval
+    for i, density in  enumerate([0.0, 0.5, 1.0]):
+        fig, ax = plt.subplots(figsize=(8, 6))
+        
+        # Extract the 2D slice for the current density interval
+        accuracy_slice = accuracy_heatmap[:, :, i]
+        
+        # Normalize the accuracy values for color mapping
+        norm = Normalize(vmin=accuracy_slice.min(), vmax=accuracy_slice.max())
+        colors = viridis(norm(accuracy_slice))
+        
+        # Plot the heatmap
+        cax = ax.imshow(accuracy_slice, cmap=viridis, norm=norm, origin='lower')
+        
+        # Add color bar
+        cbar = fig.colorbar(cax, ax=ax, pad=0.1)
+        cbar.set_label('Accuracy')
+        
+        # Set labels and title
+        ax.set_title(f"Density Interval {density}")
+        ax.set_xlabel("Number of States")
+        ax.set_ylabel("Number of Transitions")
+        
+        # Set ticks
+        ax.set_xticks(np.arange(num_states))
+        ax.set_yticks(np.arange(num_transitions))
+        ax.set_xticklabels(np.arange(1, num_states + 1))
+        ax.set_yticklabels(np.arange(1, num_transitions + 1))
+        
+        # Save the plot
+        plt.savefig(os.path.join(Config.BASE_PATH, 'dfa_statestate', f"accuracy_dfa_statestate_density_{density}.png"), dpi=300)
+        plt.close()
+    
+    np.savez(os.path.join(Config.BASE_PATH, 'dfa_statestate', 'accuracy_dfa_statestate.npz'), array=accuracy_heatmap)
+
+def evaluate_random_sequence(model_name:str, num_samples:int, init_states:list, init_transitions:list, max_states:int, min_states:int, state_interval:int, max_transitions:int, min_transitions:int, transition_interval:int):
+    #tracking correct and incorrect outputs
+    correct_output = {}
+    incorrect_output = {}
+    #track 2D heatmap of accuracy
+    accuracy_heatmap = np.zeros((len(init_states)+(max_states-min_states)//state_interval, len(init_transitions) + (max_transitions-min_transitions)//transition_interval))
+
+    for i, state in tqdm(enumerate(init_states + list(range(min_states, max_states, state_interval)))):
+        for j, trans in enumerate(init_transitions + list(range(min_transitions, max_transitions, transition_interval))):
+            
+            seq_generator = RandomLetterSequenceGenerator(length=trans, repeat_pattern_len=state)
+            eval_pipeline = EvaluationPipeline(model_name=model_name, sequence_generator=seq_generator)
+
+            acc, correct_per_sample, sequences, labels, __ = eval_pipeline.generate_and_classify_accuracy(num_samples=num_samples, seq_len=trans)
+
+            for (correct,s,l) in zip(correct_per_sample, sequences, labels):
+                if state not in correct_output:
+                    correct_output[state] = {}
+                if trans not in correct_output[state]:
+                    correct_output[state][trans] = []
+               
+                if state not in incorrect_output:
+                    incorrect_output[state] = {}
+                if trans not in incorrect_output[state]:
+                    incorrect_output[state][trans] = []
+                
+                if correct:
+                    correct_output[state][trans].append([s, l])
+                else:
+                    incorrect_output[state][trans].append([s, l])
+            
+            accuracy_heatmap[i][j] = acc
+            print(f"STATE {state} | TRANS {trans} | ACCURACY: {acc*100}%")
+            
+    os.mkdir(os.path.join(Config.BASE_PATH, 'random'))
+    #save all the outputs and heatmaps
+    with open(os.path.join(Config.BASE_PATH, 'random', 'correct_random_letter.json'), 'w') as f:
+        json.dump(correct_output, f, indent=4)
+    with open(os.path.join(Config.BASE_PATH, 'random', 'incorrect_random_letter.json'), 'w') as f:
+        json.dump(incorrect_output, f, indent=4)
+    
+    # Optional: label the rows and columns
+    row_labels = init_states + [state for state in range(min_states, max_states, state_interval)]
+    col_labels = init_transitions + [trans for trans in range(min_transitions, max_transitions, transition_interval)]
+    df = pd.DataFrame(accuracy_heatmap, index=row_labels, columns=col_labels)
+
+    # Plot and save heatmap
+    plt.figure(figsize=(8, 8))
+    ax = sns.heatmap(df, annot=True, fmt=".2f", cmap="viridis", annot_kws={"size": 5, "rotation": 30})# Label colorbar
+    colorbar = ax.collections[0].colorbar
+    colorbar.set_label('Accuracy')
+    plt.title(f"Random Sequence | {model_name}")
+    plt.xlabel("Number of Transitions")
+    plt.ylabel("Number of States")
+    plt.savefig(os.path.join(Config.BASE_PATH,'random', "accuracy_random_letter.png"), dpi=300)
+    plt.close()
+
+    np.savez(os.path.join(Config.BASE_PATH, 'random', 'accuracy_random_letter.npz'), array=accuracy_heatmap)
+
 if __name__ == '__main__':
     pdb.set_trace()
 
     #num states range
     init_states = [1,2,3,4,5,6,7,8,9]
-    min_states = 10
+    init_states = []
+    min_states = 30
     max_states = 110
     state_interval = 10
     #transition range
@@ -160,286 +410,79 @@ if __name__ == '__main__':
     num_samples = 50
 
     #name of model
-    model_name = 'pythia-70m'
+    model_name = 'pythia-14m'
     '''
     https://transformerlensorg.github.io/TransformerLens/generated/model_properties_table.html?utm_source=chatgpt.com
     Range of values to try:
-    GPT2: gpt2-small, gpt2-medium, gpt2-large, gpt2-xl
-    OPT: facebook/opt-125m, facebook/opt-2.7b, facebook/opt-13b
+    GPT2: gpt2-small, gpt2-medium, gpt2-large, gpt2-xl, othello-gpt
+    OPT: facebook/opt-125m, facebook/opt-2.7b, facebook/opt-6.7b
     TinyStories: "tiny-stories-1M", "tiny-stories-3M", tiny-stories-28M
     Pythia: pythia-14m, pythia-70m, pythia-1.4b
-    LLaMa: llama-7b, llama-13b, llama-30b
+    LLaMa: llama-7b, llama-13b, llama-30b [DOESN'T WORK DIRECTLY]
     T5: t5-small, t5-base, t5-large
     '''
-
-    BASE_PATH = os.path.relpath(f'./{model_name}')
-    if not os.path.exists(BASE_PATH):
-        os.mkdir(BASE_PATH)
-
-    # #tracking correct and incorrect outputs
-    # correct_output = {}
-    # incorrect_output = {}
-    # #track 2D heatmap of accuracy
-    # accuracy_heatmap = np.zeros((len(init_states)+(max_states-min_states)//state_interval, len(init_transitions) + (max_transitions-min_transitions)//transition_interval))
-
-    # for i, state in enumerate(init_states + list(range(min_states, max_states, state_interval))):
-    #     for j, trans in enumerate(init_transitions + list(range(min_transitions, max_transitions, transition_interval))):
-            
-    #         seq_generator = RandomLetterSequenceGenerator(length=trans, repeat_pattern_len=state)
-    #         eval_pipeline = EvaluationPipeline(model_name=model_name, sequence_generator=seq_generator)
-
-    #         acc, correct_per_sample, sequences, labels = eval_pipeline.generate_and_classify_accuracy(num_samples=num_samples, seq_len=trans)
-
-    #         for (correct,s,l) in zip(correct_per_sample, sequences, labels):
-    #             if state not in correct_output:
-    #                 correct_output[state] = {}
-    #             if trans not in correct_output[state]:
-    #                 correct_output[state][trans] = []
-               
-    #             if state not in incorrect_output:
-    #                 incorrect_output[state] = {}
-    #             if trans not in incorrect_output[state]:
-    #                 incorrect_output[state][trans] = []
-                
-
-    #             if correct:
-    #                 correct_output[state][trans].append([s, l])
-    #             else:
-    #                 incorrect_output[state][trans].append([s, l])
-            
-    #         accuracy_heatmap[i][j] = acc
-    #         print(f"STATE {state} | TRANS {trans} | ACCURACY: {acc*100}%")
-            
-    # pdb.set_trace()
-    # os.mkdir(os.path.join(BASE_PATH, 'random'))
-    # #save all the outputs and heatmaps
-    # with open(os.path.join(BASE_PATH, 'random', 'correct_random_letter.json'), 'w') as f:
-    #     json.dump(correct_output, f, indent=4)
-    # with open(os.path.join(BASE_PATH, 'random', 'incorrect_random_letter.json'), 'w') as f:
-    #     json.dump(incorrect_output, f, indent=4)
     
-    # # Optional: label the rows and columns
-    # row_labels = init_states + [state for state in range(min_states, max_states, state_interval)]
-    # col_labels = init_transitions + [trans for trans in range(min_transitions, max_transitions, transition_interval)]
-    # df = pd.DataFrame(accuracy_heatmap, index=row_labels, columns=col_labels)
-
-    # # Plot and save heatmap
-    # plt.figure(figsize=(8, 8))
-    # ax = sns.heatmap(df, annot=True, fmt=".2f", cmap="viridis", annot_kws={"size": 5, "rotation": 30})# Label colorbar
-    # colorbar = ax.collections[0].colorbar
-    # colorbar.set_label('Accuracy')
-    # plt.title(f"Random Sequence | {model_name}")
-    # plt.xlabel("Number of Transitions")
-    # plt.ylabel("Number of States")
-    # plt.savefig(os.path.join(BASE_PATH,'random', "accuracy_random_letter.png"), dpi=300)
-    # plt.close()
-
-    pdb.set_trace()
-
-    #tracking correct and incorrect outputs
-    correct_output = {}
-    incorrect_output = {}
-    #track 3D heatmaps of accuracy for DFA state action environment
-    accuracy_heatmaps = np.zeros((len(init_states)+(max_states-min_states)//state_interval, len(init_transitions) + (max_transitions-min_transitions)//transition_interval, density_interval))
-
-    for i, state in enumerate(init_states + list(range(min_states, max_states, state_interval))):
-        for j, trans in enumerate(init_transitions + list(range(min_transitions, max_transitions, transition_interval))):
-                
-            max_density = max(1, factorial(state) / 2*factorial(state-2))
-            interval = max((max_density-state+1)//density_interval, 1)
-            for k, density in enumerate(range(state-1, max_density, interval)):
-                if state not in correct_output:
-                    correct_output[state] = {}
-                if trans not in correct_output[state]:
-                    correct_output[state][trans] = {}
-                if density not in correct_output[state][trans]:
-                    correct_output[state][trans][density] = []
-                if state not in incorrect_output:
-                    incorrect_output[state] = {}
-                if trans not in incorrect_output[state]:
-                    incorrect_output[state][trans] = {}
-                if density not in incorrect_output[state][trans]:
-                    incorrect_output[state][trans][density] = []
-                pdb.set_trace()
-                seq_generator = DFAStateActionSequenceGenerator(num_states=state, num_edges=density, num_unique_actions=state//2)
-                eval_pipeline = EvaluationPipeline(model_name=model_name, sequence_generator=seq_generator)
-
-                acc, correct_per_sample, sequences, labels = eval_pipeline.generate_and_classify_accuracy(num_samples=num_samples, seq_len=trans)
-
-                for (correct,s,l) in zip(correct_per_sample, sequences, labels):
-                    
-                    if correct:
-                        correct_output[state][trans][density].append([s, l])
-                    else:
-                        incorrect_output[state][trans][density].append([s, l])
-                
-                accuracy_heatmap[i][j][k] = acc
-    #save all the outputs and heatmaps
-    os.mkdir(os.path.join(BASE_PATH, 'dfa_state'))
-    with open(os.path.join(BASE_PATH, 'dfa_state', 'correct_dfastateaction.json'), 'w') as f:
-        json.dump(correct_output, f, indent=4)
-    with open(os.path.join(BASE_PATH, 'dfa_state', 'incorrect_dfastateaction.json'), 'w') as f:
-        json.dump(incorrect_output, f, indent=4)
-    #plot and save 3D heatmap
-    fig = plt.figure(figsize=(6, 6))
-    ax = fig.add_subplot(111, projection='3d')
-    ax.voxels(accuracy_heatmap, facecolors='blue', edgecolor='k')
-    # Add colorbar
-    norm = Normalize(vmin=accuracy_heatmap.min(), vmax=accuracy_heatmap.max())
-    colors = viridis(norm(accuracy_heatmap))
-    mappable = ScalarMappable(norm=norm, cmap=viridis)
-    mappable.set_array(accuracy_heatmap)
-    cbar = plt.colorbar(mappable, ax=ax, pad=0.1)
-    cbar.set_label("Accuracy")
-    plt.savefig(os.path.join(BASE_PATH, 'dfa_state', "accuracy_dfaactionstate.png"), dpi=300)
-    plt.close()
+    # evaluate_random_sequence(
+    #                 model_name=model_name, 
+    #                 num_samples=num_samples, 
+    #                 init_states=init_states, 
+    #                 init_transitions=init_transitions, 
+    #                 max_states=max_states, 
+    #                 min_states=min_states, 
+    #                 state_interval=state_interval, 
+    #                 max_transitions=max_transitions, 
+    #                 min_transitions=min_transitions, 
+    #                 transition_interval=transition_interval
+    #             )
     
-
-    #tracking correct and incorrect outputs
-    correct_output = {}
-    incorrect_output = {}
-    #track 3D heatmaps of accuracy for DFA state state environment
-    accuracy_heatmaps = np.zeros(( len(init_states)+ (max_states-min_states)//state_interval, len(init_transitions) + (max_transitions-min_transitions)//transition_interval, density_interval))
-
-    for i, state in enumerate(init_states+list(range(min_states, max_states, state_interval))):
-        for j, trans in enumerate(init_transitions + list(range(min_transitions, max_transitions, transition_interval))):
-                
-            max_density = max(factorial(state) / 2*factorial(state-2),1)
-            interval = max((max_density-state+1)//density_interval, 1)
-
-            for k, density in enumerate(range(state-1, max_density, interval)):
-
-                if state not in correct_output:
-                    correct_output[state] = {}
-                if trans not in correct_output[state]:
-                    correct_output[state][trans] = {}
-                if density not in correct_output[state][trans]:
-                    correct_output[state][trans][density] = []
-                if state not in incorrect_output:
-                    incorrect_output[state] = {}
-                if trans not in incorrect_output[state]:
-                    incorrect_output[state][trans] = {}
-                if density not in incorrect_output[state][trans]:
-                    incorrect_output[state][trans][density] = []
-                
-                seq_generator = DFAStateSequenceGenerator(num_states=state, num_edges=density)
-                eval_pipeline = EvaluationPipeline(model_name=model_name, sequence_generator=seq_generator)
-
-                acc, correct_per_sample, sequences, labels = eval_pipeline.generate_and_classify_accuracy(num_samples=num_samples, seq_len=trans)
-
-                for (correct,s,l) in zip(correct_per_sample, sequences, labels):
-                    if correct:
-                        correct_output[state][trans][density].append([s, l])
-                    else:
-                        incorrect_output[state][trans][density].append([s, l])
-                
-                accuracy_heatmap[i][j][k] = acc
-                pdb.set_trace()
-
-    os.mkdir(os.path.join(BASE_PATH, 'dfa_state'))
-    #save all the outputs and heatmaps
-    with open(os.path.join(BASE_PATH, 'dfa_state','correct_dfastate.json'), 'w') as f:
-        json.dump(correct_output, f, indent=4)
-    with open(os.path.join(BASE_PATH, 'dfa_state', 'incorrect_dfastate.json'), 'w') as f:
-        json.dump(incorrect_output, f, indent=4)
+    evaluate_dfa_stateaction_sequence(
+                    model_name=model_name, 
+                    num_samples=num_samples, 
+                    init_states=init_states, 
+                    init_transitions=init_transitions, 
+                    max_states=max_states, 
+                    min_states=min_states, 
+                    state_interval=state_interval, 
+                    max_transitions=max_transitions, 
+                    min_transitions=min_transitions, 
+                    transition_interval=transition_interval,
+                    density_interval = density_interval
+                )
     
-    #plot and save 3D heatmap
-    fig = plt.figure(figsize=(6, 6))
-    ax = fig.add_subplot(111, projection='3d')
-    ax.voxels(accuracy_heatmap, facecolors='blue', edgecolor='k')
-    norm = Normalize(vmin=accuracy_heatmap.min(), vmax=accuracy_heatmap.max())
-    colors = viridis(norm(accuracy_heatmap))
-    mappable = ScalarMappable(norm=norm, cmap=viridis)
-    mappable.set_array(accuracy_heatmap)
-    cbar = plt.colorbar(mappable, ax=ax, pad=0.1)
-    cbar.set_label('Accuracy')
-    plt.title(f"Random Sequence | {model_name}")
-    plt.xlabel("Number of Transitions")
-    plt.ylabel("Number of States")
-    plt.savefig(os.path.join(BASE_PATH, 'dfa_state', "accuracy_dfastate.png"), dpi=300)
-    plt.close()
+    evaluate_dfa_statestate_sequence(
+                    model_name=model_name, 
+                    num_samples=num_samples, 
+                    init_states=init_states, 
+                    init_transitions=init_transitions, 
+                    max_states=max_states, 
+                    min_states=min_states, 
+                    state_interval=state_interval, 
+                    max_transitions=max_transitions, 
+                    min_transitions=min_transitions, 
+                    transition_interval=transition_interval,
+                    density_interval = density_interval
+                )
 
-    
-    #tracking correct and incorrect outputs
-    correct_output = {}
-    incorrect_output = {}
-    #track 3D heatmaps of accuracy for DFA state action environment
-    accuracy_heatmaps = np.zeros((len(init_states) + (max_states-min_states)//state_interval, len(init_transitions) + (max_transitions-min_transitions)//transition_interval), density_interval)
 
-    for i, state in enumerate(init_states + list(range(min_states, max_states, state_interval))):
-        for j, trans in enumerate(init_transitions + list(range(min_transitions, max_transitions, transition_interval))):
-                
-            max_density = factorial(state) / 2*factorial(state-2)
-            for k, density in enumerate(range(state-1, max_density, (max_density-state+1)//density_interval)):
 
-                if state not in correct_output:
-                    correct_output[state] = {}
-                if trans not in correct_output[state]:
-                    correct_output[state][trans] = {}
-                if density not in correct_output[state][trans]:
-                    correct_output[state][trans][density] = []
-                if state not in incorrect_output:
-                    incorrect_output[state] = {}
-                if trans not in incorrect_output[state]:
-                    incorrect_output[state][trans] = {}
-                if density not in incorrect_output[state][trans]:
-                    incorrect_output[state][trans][density] = []
-                
-                seq_generator = DFAPDDLSequenceGenerator(num_states=state, num_edges=density, num_unique_actions=state//2)
-                eval_pipeline = EvaluationPipeline(model_name=model_name, sequence_generator=seq_generator)
+   
 
-                acc, correct_per_sample, sequences, labels = eval_pipeline.generate_and_classify_accuracy(num_samples=num_samples, seq_len=trans)
 
-                for (correct,s,l) in zip(correct_per_sample, sequences, labels):
-                    
-                    if correct:
-                        correct_output[state][trans][density].append([s, l])
-                    else:
-                        incorrect_output[state][trans][density].append([s, l])
-                
-                accuracy_heatmap[i][j][k] = acc
 
-        #save all the outputs and heatmaps
-        os.mkdir(os.path.join(BASE_PATH, 'dfa_pddl'))
-        with open(os.path.join(BASE_PATH, 'dfa_pddl', 'correct_dfapddl.json'), 'w') as f:
-            json.dump(correct_output, f, indent=4)
-        with open(os.path.join(BASE_PATH, 'dfa_pddl', 'incorrect_dfapddl.json'), 'w') as f:
-            json.dump(incorrect_output, f, indent=4)
-        #plot and save 3D heatmap
-        fig = plt.figure(figsize=(6, 6))
-        ax = fig.add_subplot(111, projection='3d')
-        ax.voxels(accuracy_heatmap, facecolors='blue', edgecolor='k')
-         # Add colorbar
-        norm = Normalize(vmin=accuracy_heatmap.min(), vmax=accuracy_heatmap.max())
-        colors = viridis(norm(accuracy_heatmap))
-        mappable = ScalarMappable(norm=norm, cmap=viridis)
-        mappable.set_array(accuracy_heatmap)
-        cbar = plt.colorbar(mappable, ax=ax, pad=0.1)
-        cbar.set_label("Accuracy")
-        plt.savefig(os.path.join(BASE_PATH, 'dfa_pddl', "accuracy_dfapddl.png"), dpi=300)
-        plt.close()
 
-                
+
+
+
+
+
+
+
+
+
+
+
 
             
             
 
             
-            
-
-
-            
-
-
-# Example usage
-# seq_generator = RandomLetterSequenceGenerator(...)
-# pipeline = EvaluationPipeline('pythia-70m', seq_generator)
-# accuracy = pipeline.generate_and_classify_accuracy(num_samples=100)
-# print("Accuracy:", accuracy)
-# token_probs = pipeline.get_token_probabilities("example sequence")
-# print("Token Probabilities:", token_probs)
-# activation_patterns = pipeline.get_activation_patterns("example sequence", layer_idx=3, head_idx=6)
-# print("Activation Patterns:", activation_patterns)
-# logits, log_probs = pipeline.get_logits_and_logprobs("example sequence")
-# print("Logits:", logits)
-# print("Log Probabilities:", log_probs) 

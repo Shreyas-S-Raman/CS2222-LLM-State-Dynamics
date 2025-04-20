@@ -71,41 +71,75 @@ class DFAStateActionSequenceGenerator(SequenceGenerator):
     def __init__(self, dfa=None, num_states:int=2, num_edges:int=1, num_unique_actions:int=1, max_sink_nodes:int=1, start_state:str=None):
         super().__init__()
 
-        assert num_edges <= (factorial(num_states))/(2*factorial(num_states-2)), "ERROR: cannot have more edges than maximally possible between all nodes"
-        assert num_edges >= num_states - 1, "ERROR: there must be an edge at least between every state to ensure no state isolated"
+        #NOTE: some 'states' (2 lower case letter combos) registered as 2 tokens making next state prediction not valuable
+        self.skip_states = {'gv', 'vz', 'gx', 'lm', 'cq', 'zj', 'sz', 'kv', 'zv', 'qb', 'xz', 'rj', 'dz', 'pq', 'hf', 'wv', 'rk', 'vf', 'wj', 'xm', 'qk', 'zk', 'hz', 'gj', 'vw', 'tq', 'zf', 'hc', 'jd', 'sj', 'zw', 'lg', 'xg', 'zc', 'ej', 'hk', 'qj', 'tb', 'jx', 'wz', 'lw', 'mq', 'lj', 'jr', 'kq', 'vn', 'hv', 'gf', 'xr', 'qe', 'zs', 'vk', 'qm', 'jf', 'rz', 'qo', 'jk', 'xv', 'jz', 'yw', 'fz', 'bv', 'nf', 'kp', 'xu', 'kz', 'yj', 'mf', 'hb', 'gq', 'zr', 'jm', 'gk', 'jh', 'wc', 'xk', 'pv', 'fj', 'jb', 'mw', 'mh', 'nq', 'jv', 'xh', 'kc', 'bw', 'hg', 'dg', 'xq', 'tj', 'kx', 'qr', 'lk', 'fh', 'uq', 'pf', 'jg', 'kd', 'gw', 'qf', 'jq', 'yf', 'cg', 'zp', 'qz', 'xo', 'mj', 'xl', 'cx', 'vb', 'zm', 'sx', 'fq', 'qp', 'wg', 'yb', 'hx', 'dw', 'bq', 'jw', 'qh', 'uw', 'lz', 'nh', 'bk', 'qv', 'bz', 'qg', 'lq', 'zt', 'zq', 'hq', 'lx', 'pk', 'xj', 'cj', 'rv', 'wf', 'jy', 'nj', 'dv', 'eo', 'yh', 'pz', 'kf', 'qx', 'fv', 'zd', 'oq', 'zl', 'vh', 'rp', 'yc', 'qd', 'yv', 'mv', 'yq', 'cw', 'qn', 'vq', 'wq', 'xw', 'hj', 'mz', 'pj', 'lh', 'vx', 'bx', 'fk', 'zx', 'qy', 'qw', 'qc', 'rq', 'nk', 'jt', 'xn', 'jn', 'pw', 'zg', 'nx', 'vj'}
+        #NOTE: some 'actions' (2 upper case letter combos) registerd as 2 tokens making next state predction not valuable
+        self.skip_actions = {'YC', 'LQ', 'YM', 'HG', 'VU', 'ZM', 'HW', 'NQ', 'ZH', 'FZ', 'LJ', 'FQ', 'CY', 'YU', 'KU', 'WU', 'BK', 'LW', 'YQ', 'YD', 'RK', 'DY', 'QM', 'QH', 'QZ', 'RV', 'QC', 'JH', 'ZL', 'SV', 'AJ', 'WL', 'VF', 'WV', 'NJ', 'ZD', 'XB', 'JX', 'QJ', 'KD', 'ZY', 'QX', 'XN', 'JN', 'VX', 'EJ', 'GK', 'IH', 'QN', 'CZ', 'KG', 'EZ', 'QE', 'LK', 'GZ', 'YB', 'XR', 'KL', 'JU', 'XO', 'XZ', 'QP', 'ZQ', 'QT', 'YX', 'TZ', 'VK', 'ZJ', 'XH', 'YT', 'CX', 'RU', 'BJ', 'WX', 'QR', 'XD', 'ZF', 'UH', 'VV', 'ZW', 'TJ', 'NU', 'RX', 'XA', 'GX', 'SJ', 'LN', 'MV', 'HZ', 'PZ', 'MJ', 'AO', 'XC', 'JE', 'WI', 'ZB', 'YG', 'QK', 'KV', 'ZP', 'ZG', 'LH', 'PQ', 'VY', 'QB', 'JW', 'JF', 'UJ', 'KJ', 'GJ', 'ZV', 'XU', 'YW', 'ZT', 'KQ', 'ZI', 'EI', 'XE', 'DV', 'JK', 'AQ', 'WZ', 'EQ', 'XF', 'OI', 'BX', 'MZ', 'JQ', 'XK', 'DG', 'TU', 'QI', 'JV', 'KM', 'KP', 'IW', 'QA', 'RQ', 'CQ', 'LZ', 'QW', 'HV', 'UY', 'YZ', 'DZ', 'NZ', 'OQ', 'NX', 'YF', 'HX', 'LX', 'JZ', 'QS', 'YV', 'ZC', 'QD', 'ZU', 'QV', 'RJ', 'VN', 'WQ', 'DQ', 'EK', 'ZO', 'VH', 'VJ', 'UZ', 'EO', 'OZ', 'QY', 'BV', 'SX', 'YI', 'VW', 'PV', 'PJ', 'JT', 'KW', 'YO', 'OJ', 'JY', 'DU', 'WJ', 'KX', 'XG', 'WO', 'PX', 'TQ', 'UW', 'VZ', 'JL', 'SZ', 'XI', 'BZ', 'RZ', 'XV', 'HJ', 'XS', 'WY', 'YJ', 'CK', 'KF', 'JI', 'UO', 'BQ', 'ZS', 'TK', 'EY', 'GQ', 'BH', 'YH', 'QO', 'YK', 'LF', 'QQ', 'CJ', 'SQ', 'KZ', 'HN', 'ZK', 'FJ', 'WK', 'KH', 'QG', 'QF', 'HU', 'PY', 'WG', 'UF', 'XJ', 'VQ', 'JG', 'UQ', 'XW', 'IY', 'ZN', 'VG', 'FV', 'PW', 'ZR', 'XQ'}
+
+        assert num_edges <= num_states*(num_states-1)//2 + 1, "ERROR: cannot have more edges than maximally possible between all nodes"
+        assert num_edges >= num_states, "ERROR: there must be an edge at least between every state to ensure no state isolated"
         assert max_sink_nodes <= num_states, "ERROR: number of sink nodes cannot be more than all nodes"
+        # assert num_states <= 26*26 - len(self.skip_states), "ERROR: too many states provided for base state character reprensentation"
+        # assert num_edges <= 26*26 - len(self.skip_actions), "ERROR: too many edges provided for base state character representation"
 
+        self.num_states = num_states
+        self.num_edges = num_edges
+        self.num_unique_actions = num_unique_actions
+        self.max_sink_nodes = max_sink_nodes
         self.dfa = dfa if dfa is not None else self._create_dfa(num_states=num_states, num_edges=num_edges, num_unique_actions=num_unique_actions, max_sink_nodes=max_sink_nodes)
-
         assert start_state is None or start_state in self.dfa, "ERROR: start state is not in the DFA"
-
         self.start_state = start_state
     
-    def generate(self, seq_len:int = None, start_state:str=None):
+    def generate_with_curr_dfa(self, seq_len:int = None, start_state:str=None):
+        if start_state is not None:
+            curr_state = start_state
+        elif self.start_state is not None:
+            curr_state = self.start_state
+        else:
+            curr_state = random.choice(list(self.dfa.keys()))
 
-        curr_state = start_state if start_state is not None else self.start_state
         num_steps = 0
-
-        #otuput sequence of states
         sequence = []
-        
         while curr_state is not None and num_steps < seq_len:
             sequence.append(curr_state)
             num_steps += 1
             
-            if len(self.dfa[curr_state]) > 0:
-                rand_action = random.choice(self.dfa[curr_state].keys()) 
+            if self.dfa[curr_state]:
+                rand_action = random.choice(list(self.dfa[curr_state].keys()))
                 sequence.append(rand_action)
                 curr_state = self.dfa[curr_state][rand_action]
             else:
                 break
            
-        
-        rand_action = random.choice(self.dfa[curr_state].keys()) 
-        sequence.append(rand_action)
         label = self.dfa[curr_state][rand_action]
 
-        return ' '.join(sequence), ' '+label
+        return ' '.join(sequence)+ ' ', label
+
+    def generate(self, seq_len:int = None, start_state:str=None):
+        self.dfa = self._create_dfa(num_states=self.num_states, num_edges=self.num_edges, num_unique_actions=self.num_unique_actions, max_sink_nodes=self.max_sink_nodes)
+        if start_state is not None:
+            curr_state = start_state
+        elif self.start_state is not None:
+            curr_state = self.start_state
+        else:
+            curr_state = random.choice(list(self.dfa.keys()))
+
+        num_steps = 0
+        sequence = []
+        while curr_state is not None and num_steps < seq_len:
+            sequence.append(curr_state)
+            num_steps += 1
+            
+            if self.dfa[curr_state]:
+                rand_action = random.choice(list(self.dfa[curr_state].keys()))
+                sequence.append(rand_action)
+                curr_state = self.dfa[curr_state][rand_action]
+            else:
+                break
+        
+        label = curr_state
+
+        return ' '.join(sequence) + ' ', label
 
     def visualize_dfa(self):
         G = nx.DiGraph()
@@ -130,30 +164,40 @@ class DFAStateActionSequenceGenerator(SequenceGenerator):
 
 
     def _create_dfa(self, num_states:int, num_edges:int, num_unique_actions:int, max_sink_nodes:int):
+        all_states = set()
+        for c1 in string.ascii_lowercase:
+            for c2 in string.ascii_lowercase:
+                all_states.add(f'{c1}{c2}')
+        all_actions = set()
+        for c1 in string.ascii_uppercase:
+            for c2 in string.ascii_uppercase:
+                all_actions.add(f'{c1}{c2}')
+        all_states = all_states - self.skip_states
+        all_actions = all_actions - self.skip_actions
 
-        for i in range(0, num_states//len(string.ascii_lowercase)+1):
-            all_states = [s + f'_{i}' for s in string.ascii_lowercase]
-        for i in range(0, num_unique_actions//len(string.ascii_uppercase)+1):
-            all_actions = [a + f'_{i}' for a in string.ascii_uppercase]
-        
-        all_states = set(all_states)
-        all_actions = set(all_actions)
-
-        #populate the set of actions and states used to make the DFA
+        # Populate the set of actions and states used to make the DFA
         self.states = random.sample(all_states, num_states)
         self.actions = set(random.sample(all_actions, num_unique_actions))
 
-        #assign relevant actions to each edge
+        # Assign relevant actions to each edge
         distributed_edges = self._distribute_edges(num_edges=num_edges, num_states=num_states, max_sink_nodes=max_sink_nodes)
-        dfa = {} #{s1: {action: s2}}
+        dfa = {}  # {s1: {action: s2}}
 
         for i, num_out_edges in enumerate(distributed_edges):
-
-            
             sampled_actions = random.sample(self.actions, num_out_edges)
-            sampled_states = random.sample(self.states, num_out_edges)
+            sampled_states = random.choices(self.states, k=num_out_edges)
             
-            dfa[self.states[i]] = {a:s for (a,s) in zip(sampled_actions, sampled_states)}
+            # Ensure each state has a complete set of actions
+            dfa[self.states[i]] = {a: s for (a, s) in zip(sampled_actions, sampled_states)}
+
+            # Ensure each sink node has a self-looping edge
+            if num_out_edges == 0:
+                if self.states[i] not in dfa:
+                    dfa[self.states[i]] = {}
+                if len(self.actions) > 0:
+                    self_loop_action = random.choice(list(self.actions))
+                    dfa[self.states[i]][self_loop_action] = self.states[i]
+
         return dfa
     
     def _distribute_edges(self, num_edges: int, num_states: int, max_sink_nodes: int):
@@ -161,6 +205,8 @@ class DFAStateActionSequenceGenerator(SequenceGenerator):
             raise ValueError("Number of states must be positive.")
         if num_edges < 0:
             raise ValueError("Number of edges must be non-negative.")
+        if max_sink_nodes >= num_states:
+            raise ValueError("max_sink_nodes must be less than num_states.")
 
         # Step 1: Randomly select number of sink nodes (up to max)
         num_sinks = random.randint(1, max_sink_nodes)
@@ -171,10 +217,14 @@ class DFAStateActionSequenceGenerator(SequenceGenerator):
         if num_edges == 0:
             return [0] * num_states
 
-        # Reuse stars and bars on non-sink states
-        cut_points = sorted(random.sample(range(num_edges + non_sink_states - 1), non_sink_states - 1))
-        cut_points = [-1] + cut_points + [num_edges + non_sink_states - 1]
-        non_sink_edges = [cut_points[i+1] - cut_points[i] - 1 for i in range(non_sink_states)]
+        # Ensure each state has at least one outgoing edge
+        min_outgoing_edges = 1
+        remaining_edges = num_edges - num_states  # Subtract the minimum required edges
+
+        # Distribute remaining edges with a maximum of num_states per node
+        non_sink_edges = [min_outgoing_edges] * num_states
+        for i in range(remaining_edges):
+            non_sink_edges[i % num_states] += 1
 
         # Step 3: Combine into full list
         result = []
@@ -192,7 +242,7 @@ class DFAPDDLSequenceGenerator(SequenceGenerator):
     def __init__(self, dfa=None, num_states: int = 2, num_edges: int = 1, num_unique_actions: int = 1,
                  max_sink_nodes: int = 1, start_state: str = None):
         super().__init__()
-        assert num_edges <= (factorial(num_states)) / (2 * factorial(num_states - 2)), "Too many edges"
+        assert num_edges <= max(1, ((num_states*(num_states-1))//2)), "Too many edges"
         assert num_edges >= num_states - 1, "ERROR: there must be an edge at least between every state to ensure no state isolated"
         assert max_sink_nodes <= num_states, "ERROR: number of sink nodes cannot be more than all nodes"
         
@@ -235,8 +285,6 @@ class DFAPDDLSequenceGenerator(SequenceGenerator):
             curr_state = label
             num_steps += 1
 
-        
-
         return ' '.join(sequence), ' ' +str(label)
 
     def _check_preconditions(self, action):
@@ -271,6 +319,14 @@ class DFAPDDLSequenceGenerator(SequenceGenerator):
                 pre = {f"flag_{j}": random.choice([0, 1]) for j in range(2)}
                 eff = {f"flag_{j}": random.choice([0, 1]) for j in range(2)}
                 self.action_definitions[action] = {'pre': pre, 'eff': eff}
+
+            # Ensure each sink node has a self-looping edge
+            if out_deg == 0:
+                if source not in dfa:
+                    dfa[source] = {}
+                if len(self.actions) > 0:
+                    self_loop_action = random.choice(list(self.actions))
+                    dfa[source][self_loop_action] = source
 
         return dfa
 
@@ -318,21 +374,56 @@ class DFAStateSequenceGenerator(SequenceGenerator):
 
     def __init__(self, dfa=None, num_states:int=2, num_edges:int=1, max_sink_nodes:int=1, start_state:str=None):
         super().__init__()
-
-        assert num_edges <= (factorial(num_states))/(2*factorial(num_states-2)), "ERROR: cannot have more edges than maximally possible between all nodes"
+        #NOTE: some 'states' (2 lower case letter combos) registered as 2 tokens making next state prediction not valuable
+        self.skip_states = {'gv', 'vz', 'gx', 'lm', 'cq', 'zj', 'sz', 'kv', 'zv', 'qb', 'xz', 'rj', 'dz', 'pq', 'hf', 'wv', 'rk', 'vf', 'wj', 'xm', 'qk', 'zk', 'hz', 'gj', 'vw', 'tq', 'zf', 'hc', 'jd', 'sj', 'zw', 'lg', 'xg', 'zc', 'ej', 'hk', 'qj', 'tb', 'jx', 'wz', 'lw', 'mq', 'lj', 'jr', 'kq', 'vn', 'hv', 'gf', 'xr', 'qe', 'zs', 'vk', 'qm', 'jf', 'rz', 'qo', 'jk', 'xv', 'jz', 'yw', 'fz', 'bv', 'nf', 'kp', 'xu', 'kz', 'yj', 'mf', 'hb', 'gq', 'zr', 'jm', 'gk', 'jh', 'wc', 'xk', 'pv', 'fj', 'jb', 'mw', 'mh', 'nq', 'jv', 'xh', 'kc', 'bw', 'hg', 'dg', 'xq', 'tj', 'kx', 'qr', 'lk', 'fh', 'uq', 'pf', 'jg', 'kd', 'gw', 'qf', 'jq', 'yf', 'cg', 'zp', 'qz', 'xo', 'mj', 'xl', 'cx', 'vb', 'zm', 'sx', 'fq', 'qp', 'wg', 'yb', 'hx', 'dw', 'bq', 'jw', 'qh', 'uw', 'lz', 'nh', 'bk', 'qv', 'bz', 'qg', 'lq', 'zt', 'zq', 'hq', 'lx', 'pk', 'xj', 'cj', 'rv', 'wf', 'jy', 'nj', 'dv', 'eo', 'yh', 'pz', 'kf', 'qx', 'fv', 'zd', 'oq', 'zl', 'vh', 'rp', 'yc', 'qd', 'yv', 'mv', 'yq', 'cw', 'qn', 'vq', 'wq', 'xw', 'hj', 'mz', 'pj', 'lh', 'vx', 'bx', 'fk', 'zx', 'qy', 'qw', 'qc', 'rq', 'nk', 'jt', 'xn', 'jn', 'pw', 'zg', 'nx', 'vj'}
+        assert num_edges <= num_states*(num_states-1)//2 + 1, "ERROR: cannot have more edges than maximally possible between all nodes"
         assert max_sink_nodes <= num_states, "ERROR: number of sink nodes cannot be more than all nodes"
+        assert num_states <= 26*26 - len(self.skip_states), "ERROR: too many states provided for base state character reprensentation"
 
+        self.num_states = num_states
+        self.num_edges = num_edges
+        self.max_sink_nodes = max_sink_nodes
         self.dfa = dfa if dfa is not None else self._create_dfa(num_states=num_states, num_edges=num_edges, max_sink_nodes=max_sink_nodes)
 
         assert start_state is None or start_state in self.dfa, "ERROR: start state is not in the DFA"
         self.start_state = start_state
 
-    def generate(self, seq_len:int = None, start_state:str=None):
-        curr_state = start_state if start_state is not None else self.start_state
+    def generate_with_curr_dfa(self, seq_len:int = None, start_state:str=None):
+        if start_state is not None:
+            curr_state = start_state
+        elif self.start_state is not None:
+            curr_state = self.start_state
+        else:
+            curr_state = random.choice(list(self.dfa.keys()))
         num_steps = 0
 
         #otuput sequence of states
         sequence = []
+
+        while curr_state is not None and num_steps < seq_len:
+            sequence.append(curr_state)
+            num_steps += 1
+            if len(self.dfa[curr_state]) > 0:
+                curr_state = random.choice(self.dfa[curr_state]) 
+            else:
+                break
+            
+        labels = curr_state
+        return ' '.join(sequence) + ' ', labels
+
+    def generate(self, seq_len:int = None, start_state:str=None):
+        self.dfa =  self._create_dfa(num_states=self.num_states, num_edges=self.num_edges, max_sink_nodes=self.max_sink_nodes)
+        if start_state is not None:
+            curr_state = start_state
+        elif self.start_state is not None:
+            curr_state = self.start_state
+        else:
+            curr_state = random.choice(list(self.dfa.keys()))
+        num_steps = 0
+
+        #otuput sequence of states
+        sequence = []
+        
         
         while curr_state is not None and num_steps < seq_len:
             sequence.append(curr_state)
@@ -345,29 +436,30 @@ class DFAStateSequenceGenerator(SequenceGenerator):
                 break
             
         labels = self.dfa[curr_state]
-        return ' '.join(sequence), ' '+labels
+        return ' '.join(sequence) + ' ', labels
 
     def _create_dfa(self, num_states:int, num_edges:int, max_sink_nodes:int):
+        all_states = set()
+        for c1 in string.ascii_lowercase:
+            for c2 in string.ascii_lowercase:
+                all_states.add(f'{c1}{c2}')
+        all_states = all_states - self.skip_states
 
-        for i in range(0, num_states//len(string.ascii_lowercase)+1):
-            all_states = [s + f'_{i}' for s in string.ascii_lowercase]
-       
-        all_states = set(all_states)
-        all_actions = set(all_actions)
-
-        #populate the set of states used to make the DFA
+        # Populate the set of states used to make the DFA
         self.states = random.sample(all_states, num_states)
 
-        #assign relevant actions to each edge
+        # Assign relevant actions to each edge
         distributed_edges = self._distribute_edges(num_edges=num_edges, num_states=num_states, max_sink_nodes=max_sink_nodes)
-        dfa = {} #{s1: set{s2}}
-
+        dfa = {}  # {s1: set{s2}}
 
         for i, num_out_edges in enumerate(distributed_edges):
-
             sampled_states = random.sample(self.states, num_out_edges)
+            dfa[self.states[i]] = set(sampled_states)
 
-            dfa[self.states[i]] = set([s for s in sampled_states])
+            # Ensure each sink node has a self-looping edge
+            if num_out_edges == 0:
+                dfa[self.states[i]].add(self.states[i])
+
         return dfa
     
     def _distribute_edges(self, num_edges: int, num_states: int, max_sink_nodes: int):
@@ -375,7 +467,7 @@ class DFAStateSequenceGenerator(SequenceGenerator):
             raise ValueError("Number of states must be positive.")
         if num_edges < 0:
             raise ValueError("Number of edges must be non-negative.")
-        if max_sink_nodes <= num_states:
+        if max_sink_nodes >= num_states:
             raise ValueError("max_sink_nodes must be less than num_states.")
 
         # Step 1: Randomly select number of sink nodes (up to max)
@@ -387,10 +479,17 @@ class DFAStateSequenceGenerator(SequenceGenerator):
         if num_edges == 0:
             return [0] * num_states
 
-        # Reuse stars and bars on non-sink states
-        cut_points = sorted(random.sample(range(num_edges + non_sink_states - 1), non_sink_states - 1))
-        cut_points = [-1] + cut_points + [num_edges + non_sink_states - 1]
-        non_sink_edges = [cut_points[i+1] - cut_points[i] - 1 for i in range(non_sink_states)]
+        # Ensure each state has at least one outgoing edge
+        min_outgoing_edges = 1
+        remaining_edges = num_edges - num_states  # Subtract the minimum required edges
+
+        # Distribute remaining edges with a maximum of num_states per node
+        non_sink_edges = [min_outgoing_edges] * num_states
+        for i in range(remaining_edges):
+            non_sink_edges[i % num_states] += 1
+
+        # Ensure no state has more than num_states outgoing edges
+        non_sink_edges = [min(e, num_states) for e in non_sink_edges]
 
         # Step 3: Combine into full list
         result = []
@@ -422,6 +521,4 @@ class DFAStateSequenceGenerator(SequenceGenerator):
 
         plt.axis('off')
         plt.show()
-
-def factorial(n: int):
-    return 1 if n <= 1 else n *factorial(n - 1)
+        
