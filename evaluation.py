@@ -193,7 +193,7 @@ def evaluate_dfa_stateaction_sequence(model_name:str, num_samples:int, init_stat
         json.dump(correct_output, f, indent=4)
     with open(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'incorrect_dfa_stateaction.json'), 'w') as f:
         json.dump(incorrect_output, f, indent=4)
-    with open(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'dfa_stateaction.json'), 'w') as f:
+    with open(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'dfa_stateaction.pkl'), 'w') as f:
         pickle.dump(dfa_output, f)
    
     # Get the shape of the heatmap
