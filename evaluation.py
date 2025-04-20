@@ -168,7 +168,7 @@ def evaluate_dfa_stateaction_sequence(model_name:str, num_samples:int, init_stat
                 seq_generator = DFAStateActionSequenceGenerator(
                                 num_states=state, 
                                 num_edges=density,
-                                num_unique_actions=400,
+                                num_unique_actions=400 if not reduce_states else 26,
                                 max_sink_nodes=1,
                                 reduce_states = reduce_states
                                 )
