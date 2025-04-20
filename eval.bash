@@ -19,7 +19,7 @@ echo "SLURM_ARRAY_JOB_ID: $SLURM_ARRAY_JOB_ID"
 model='tiny-stories-3M'
 echo "RUNNING ${model}"
 
-python3 evaluate_model.py --model_name $model
+python3 evaluate_model.py --model_name $model -r
 echo "FINISHED RUNNING ${model}$"
 
 # https://transformerlensorg.github.io/TransformerLens/generated/model_properties_table.html?utm_source=chatgpt.com
