@@ -18,7 +18,7 @@ if __name__ == '__main__':
     if args.reduce_states:
         Config.reduce_states = True
     
-    path = f'./{model_name}' if not Config.reduce_states else f'./{model_name}_reduced'
+    path = f'./{Config.model_name}' if not Config.reduce_states else f'./{Config.model_name}_reduced'
     Config.BASE_PATH = os.path.relpath(path)
     
     if not os.path.exists(Config.BASE_PATH):
