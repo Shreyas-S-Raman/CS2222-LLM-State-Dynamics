@@ -194,7 +194,7 @@ def evaluate_dfa_stateaction_sequence(model_name:str, num_samples:int, init_stat
     with open(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'incorrect_dfa_stateaction.json'), 'w') as f:
         json.dump(incorrect_output, f, indent=4)
     with open(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'dfa_stateaction.json'), 'w') as f:
-        json.dump(dfa_output, f, indent=4)
+        pickle.dump(dfa_output, f)
    
     # Get the shape of the heatmap
     num_states, num_transitions, density_intervals = accuracy_heatmap.shape
@@ -294,7 +294,7 @@ def evaluate_dfa_statestate_sequence(model_name:str, num_samples:int, init_state
     with open(os.path.join(Config.BASE_PATH, 'dfa_statestate', 'incorrect_dfa_statestate.json'), 'w') as f:
         json.dump(incorrect_output, f, indent=4)
     with open(os.path.join(Config.BASE_PATH, 'dfa_statestate', 'dfa_statestate.pkl'), 'w') as f:
-        pickle.dump(data, f)
+        pickle.dump(dfa_output, f)
    
     # Get the shape of the heatmap
     num_states, num_transitions, density_intervals = accuracy_heatmap.shape
@@ -396,28 +396,7 @@ def evaluate_random_sequence(model_name:str, num_samples:int, init_states:list, 
 if __name__ == '__main__':
     pdb.set_trace()
 
-    #num states range
-    # init_states = [1,2,3,4,5,6,7,8,9]
-    init_states = []
-    min_states = 90
-    max_states = 110
-    state_interval = 10
-    #transition range
-    # init_transitions = [1,2,3,4,5,6,7,8,9]
-    init_transitions = []
-
-    min_transitions = 80
-    max_transitions = 110
-    transition_interval = 10
-    #density interval
-    density_interval = 10
-
-
-    #range of samples
-    num_samples = 50
-
-    #name of model
-    model_name = 'pythia-14m'
+    
     '''
     https://transformerlensorg.github.io/TransformerLens/generated/model_properties_table.html?utm_source=chatgpt.com
     Range of values to try:
@@ -456,20 +435,20 @@ if __name__ == '__main__':
     #                 density_interval = density_interval
     #             )
     
-    evaluate_dfa_statestate_sequence(
-                    model_name=model_name, 
-                    num_samples=num_samples, 
-                    init_states=init_states, 
-                    init_transitions=init_transitions, 
-                    max_states=max_states, 
-                    min_states=min_states, 
-                    state_interval=state_interval, 
-                    max_transitions=max_transitions, 
-                    min_transitions=min_transitions, 
-                    transition_interval=transition_interval,
-                    density_interval = density_interval,
-                    reduce_states = False
-                )
+    # evaluate_dfa_statestate_sequence(
+    #                 model_name=model_name, 
+    #                 num_samples=num_samples, 
+    #                 init_states=init_states, 
+    #                 init_transitions=init_transitions, 
+    #                 max_states=max_states, 
+    #                 min_states=min_states, 
+    #                 state_interval=state_interval, 
+    #                 max_transitions=max_transitions, 
+    #                 min_transitions=min_transitions, 
+    #                 transition_interval=transition_interval,
+    #                 density_interval = density_interval,
+    #                 reduce_states = False
+    #             )
 
 
 

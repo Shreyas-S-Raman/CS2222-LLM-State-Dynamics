@@ -78,8 +78,6 @@ class DFAStateActionSequenceGenerator(SequenceGenerator):
         assert num_edges <= num_states*(num_states-1)//2 + 1, "ERROR: cannot have more edges than maximally possible between all nodes"
         assert num_edges >= num_states, "ERROR: there must be an edge at least between every state to ensure no state isolated"
         assert max_sink_nodes <= num_states, "ERROR: number of sink nodes cannot be more than all nodes"
-        # assert num_states <= 26*26 - len(self.skip_states), "ERROR: too many states provided for base state character reprensentation"
-        # assert num_edges <= 26*26 - len(self.skip_actions), "ERROR: too many edges provided for base state character representation"
 
         self.num_states = num_states
         self.num_edges = num_edges
@@ -254,8 +252,6 @@ class DFAStateSequenceGenerator(SequenceGenerator):
         assert num_edges <= num_states*(num_states-1)//2 + 1, "ERROR: cannot have more edges than maximally possible between all nodes"
         assert num_edges >= num_states, "ERROR: there must be an edge at least between every state to ensure no state isolated"
         assert max_sink_nodes <= num_states, "ERROR: number of sink nodes cannot be more than all nodes"
-        # assert num_states <= 26*26 - len(self.skip_states), "ERROR: too many states provided for base state character reprensentation"
-        # assert num_edges <= 26*26 - len(self.skip_actions), "ERROR: too many edges provided for base state character representation"
 
         self.num_states = num_states
         self.num_edges = num_edges
@@ -415,136 +411,136 @@ class DFAStateSequenceGenerator(SequenceGenerator):
 
 
 
-
-class DFAPDDLSequenceGenerator(SequenceGenerator):
-    def __init__(self, dfa=None, num_states: int = 2, num_edges: int = 1, num_unique_actions: int = 1,
-                 max_sink_nodes: int = 1, start_state: str = None):
-        super().__init__()
-        assert num_edges <= max(1, ((num_states*(num_states-1))//2)), "Too many edges"
-        assert num_edges >= num_states - 1, "ERROR: there must be an edge at least between every state to ensure no state isolated"
-        assert max_sink_nodes <= num_states, "ERROR: number of sink nodes cannot be more than all nodes"
+#NOTE: unused class
+# class DFAPDDLSequenceGenerator(SequenceGenerator):
+#     def __init__(self, dfa=None, num_states: int = 2, num_edges: int = 1, num_unique_actions: int = 1,
+#                  max_sink_nodes: int = 1, start_state: str = None):
+#         super().__init__()
+#         assert num_edges <= max(1, ((num_states*(num_states-1))//2)), "Too many edges"
+#         assert num_edges >= num_states - 1, "ERROR: there must be an edge at least between every state to ensure no state isolated"
+#         assert max_sink_nodes <= num_states, "ERROR: number of sink nodes cannot be more than all nodes"
         
-        self.state_vars = {f"flag_{i}": random.choice([0, 1]) for i in range(3)}  # binary state variables
-        self.action_definitions = {}  # action -> {'pre': ..., 'eff': ...}
+#         self.state_vars = {f"flag_{i}": random.choice([0, 1]) for i in range(3)}  # binary state variables
+#         self.action_definitions = {}  # action -> {'pre': ..., 'eff': ...}
 
-        self.dfa = dfa if dfa is not None else self._create_dfa(
-            num_states=num_states,
-            num_edges=num_edges,
-            num_unique_actions=num_unique_actions,
-            max_sink_nodes=max_sink_nodes
-        )
+#         self.dfa = dfa if dfa is not None else self._create_dfa(
+#             num_states=num_states,
+#             num_edges=num_edges,
+#             num_unique_actions=num_unique_actions,
+#             max_sink_nodes=max_sink_nodes
+#         )
 
-        assert start_state is None or start_state in self.dfa, "Invalid start state"
-        self.start_state = start_state if start_state else random.choice(list(self.dfa.keys()))
+#         assert start_state is None or start_state in self.dfa, "Invalid start state"
+#         self.start_state = start_state if start_state else random.choice(list(self.dfa.keys()))
 
-    def generate(self, seq_len: int = None, start_state: str = None):
-        curr_state = start_state if start_state is not None else self.start_state
-        num_steps = 0
-        sequence = []
+#     def generate(self, seq_len: int = None, start_state: str = None):
+#         curr_state = start_state if start_state is not None else self.start_state
+#         num_steps = 0
+#         sequence = []
 
-        while curr_state is not None and num_steps < seq_len:
-            transitions = self.dfa[curr_state]
-            valid_actions = [a for a in transitions if self._check_preconditions(a)]
-            if not valid_actions:
-                break
+#         while curr_state is not None and num_steps < seq_len:
+#             transitions = self.dfa[curr_state]
+#             valid_actions = [a for a in transitions if self._check_preconditions(a)]
+#             if not valid_actions:
+#                 break
 
-            # Select the action but do NOT apply it yet
-            action = random.choice(valid_actions)
+#             # Select the action but do NOT apply it yet
+#             action = random.choice(valid_actions)
 
-            # Log state_vars and action before effect
-            sequence.append(str(self.state_vars.copy()))
-            sequence.append(action)
+#             # Log state_vars and action before effect
+#             sequence.append(str(self.state_vars.copy()))
+#             sequence.append(action)
 
-            # Compute label as the next state
-            label = transitions[action]
+#             # Compute label as the next state
+#             label = transitions[action]
 
-            # Apply effects and transition
-            self._apply_effects(action)
-            curr_state = label
-            num_steps += 1
+#             # Apply effects and transition
+#             self._apply_effects(action)
+#             curr_state = label
+#             num_steps += 1
 
-        return ' '.join(sequence), ' ' +str(label)
+#         return ' '.join(sequence), ' ' +str(label)
 
-    def _check_preconditions(self, action):
-        return all(self.state_vars.get(k, 0) == v for k, v in self.action_definitions[action]['pre'].items())
+#     def _check_preconditions(self, action):
+#         return all(self.state_vars.get(k, 0) == v for k, v in self.action_definitions[action]['pre'].items())
 
-    def _apply_effects(self, action):
-        for k, v in self.action_definitions[action]['eff'].items():
-            self.state_vars[k] = v
+#     def _apply_effects(self, action):
+#         for k, v in self.action_definitions[action]['eff'].items():
+#             self.state_vars[k] = v
 
-    def _create_dfa(self, num_states: int, num_edges: int, num_unique_actions: int, max_sink_nodes: int):
-        states = [f"s{i}" for i in range(num_states)]
-        actions = [f"a{i}" for i in range(num_unique_actions)]
-        self.states = states
-        self.actions = set(actions)
+#     def _create_dfa(self, num_states: int, num_edges: int, num_unique_actions: int, max_sink_nodes: int):
+#         states = [f"s{i}" for i in range(num_states)]
+#         actions = [f"a{i}" for i in range(num_unique_actions)]
+#         self.states = states
+#         self.actions = set(actions)
 
-        edge_counts = self._distribute_edges(num_edges, num_states, max_sink_nodes)
-        dfa = {}
+#         edge_counts = self._distribute_edges(num_edges, num_states, max_sink_nodes)
+#         dfa = {}
 
-        for i, out_deg in enumerate(edge_counts):
-            source = states[i]
-            dfa[source] = {}
-            if out_deg == 0:
-                continue
+#         for i, out_deg in enumerate(edge_counts):
+#             source = states[i]
+#             dfa[source] = {}
+#             if out_deg == 0:
+#                 continue
 
-            sampled_actions = random.sample(actions, out_deg)
-            target_states = random.sample(states, out_deg)
+#             sampled_actions = random.sample(actions, out_deg)
+#             target_states = random.sample(states, out_deg)
 
-            for action, target in zip(sampled_actions, target_states):
-                dfa[source][action] = target
+#             for action, target in zip(sampled_actions, target_states):
+#                 dfa[source][action] = target
 
-                # Define action preconditions/effects randomly
-                pre = {f"flag_{j}": random.choice([0, 1]) for j in range(2)}
-                eff = {f"flag_{j}": random.choice([0, 1]) for j in range(2)}
-                self.action_definitions[action] = {'pre': pre, 'eff': eff}
+#                 # Define action preconditions/effects randomly
+#                 pre = {f"flag_{j}": random.choice([0, 1]) for j in range(2)}
+#                 eff = {f"flag_{j}": random.choice([0, 1]) for j in range(2)}
+#                 self.action_definitions[action] = {'pre': pre, 'eff': eff}
 
-            # Ensure each sink node has a self-looping edge
-            if out_deg == 0:
-                if source not in dfa:
-                    dfa[source] = {}
-                if len(self.actions) > 0:
-                    self_loop_action = random.choice(list(self.actions))
-                    dfa[source][self_loop_action] = source
+#             # Ensure each sink node has a self-looping edge
+#             if out_deg == 0:
+#                 if source not in dfa:
+#                     dfa[source] = {}
+#                 if len(self.actions) > 0:
+#                     self_loop_action = random.choice(list(self.actions))
+#                     dfa[source][self_loop_action] = source
 
-        return dfa
+#         return dfa
 
-    def _distribute_edges(self, num_edges: int, num_states: int, max_sink_nodes: int):
-        if num_states <= 0 or num_edges < 0:
-            raise ValueError("States and edges must be non-negative")
+#     def _distribute_edges(self, num_edges: int, num_states: int, max_sink_nodes: int):
+#         if num_states <= 0 or num_edges < 0:
+#             raise ValueError("States and edges must be non-negative")
 
-        num_sinks = random.randint(1, max_sink_nodes)
-        sink_indices = set(random.sample(range(num_states), num_sinks))
-        non_sink = num_states - num_sinks
+#         num_sinks = random.randint(1, max_sink_nodes)
+#         sink_indices = set(random.sample(range(num_states), num_sinks))
+#         non_sink = num_states - num_sinks
 
-        if num_edges == 0:
-            return [0] * num_states
+#         if num_edges == 0:
+#             return [0] * num_states
 
-        # Stars and bars for non-sink states
-        cut_points = sorted(random.sample(range(num_edges + non_sink - 1), non_sink - 1))
-        cut_points = [-1] + cut_points + [num_edges + non_sink - 1]
-        edge_alloc = [cut_points[i + 1] - cut_points[i] - 1 for i in range(non_sink)]
+#         # Stars and bars for non-sink states
+#         cut_points = sorted(random.sample(range(num_edges + non_sink - 1), non_sink - 1))
+#         cut_points = [-1] + cut_points + [num_edges + non_sink - 1]
+#         edge_alloc = [cut_points[i + 1] - cut_points[i] - 1 for i in range(non_sink)]
 
-        result = []
-        ptr = 0
-        for i in range(num_states):
-            result.append(0 if i in sink_indices else edge_alloc[ptr])
-            if i not in sink_indices:
-                ptr += 1
+#         result = []
+#         ptr = 0
+#         for i in range(num_states):
+#             result.append(0 if i in sink_indices else edge_alloc[ptr])
+#             if i not in sink_indices:
+#                 ptr += 1
 
-        return result
+#         return result
 
-    def visualize_dfa(self):
-        G = nx.DiGraph()
-        for state, transitions in self.dfa.items():
-            for action, next_state in transitions.items():
-                G.add_edge(state, next_state, label=action)
+#     def visualize_dfa(self):
+#         G = nx.DiGraph()
+#         for state, transitions in self.dfa.items():
+#             for action, next_state in transitions.items():
+#                 G.add_edge(state, next_state, label=action)
 
-        pos = nx.spring_layout(G)
-        nx.draw_networkx_nodes(G, pos, node_color='lightblue', node_size=1500, edgecolors='black')
-        nx.draw_networkx_labels(G, pos)
-        nx.draw_networkx_edges(G, pos, arrows=True)
-        edge_labels = nx.get_edge_attributes(G, 'label')
-        nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels)
-        plt.axis('off')
-        plt.show()
+#         pos = nx.spring_layout(G)
+#         nx.draw_networkx_nodes(G, pos, node_color='lightblue', node_size=1500, edgecolors='black')
+#         nx.draw_networkx_labels(G, pos)
+#         nx.draw_networkx_edges(G, pos, arrows=True)
+#         edge_labels = nx.get_edge_attributes(G, 'label')
+#         nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels)
+#         plt.axis('off')
+#         plt.show()
    
