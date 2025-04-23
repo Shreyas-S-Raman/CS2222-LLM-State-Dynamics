@@ -2,7 +2,7 @@
 #SBATCH -n 3
 #SBATCH -N 1
 #SBATCH --mem=16G
-#SBATCH -t 3:00:00
+#SBATCH -t 5:00:00
 
 ### modify seed below
 #SBATCH --array=0-0
@@ -16,10 +16,10 @@ source ~/.bashrc
 source cs2222/bin/activate
 echo "SLURM_ARRAY_JOB_ID: $SLURM_ARRAY_JOB_ID"
 
-model='pythia-70m'
+model='gpt2-large'
 echo "RUNNING ${model}"
 
-python3 evaluate_model.py --model_name $model
+python3 evaluate_model.py --model_name $model -r
 echo "FINISHED RUNNING ${model}$"
 
 # https://transformerlensorg.github.io/TransformerLens/generated/model_properties_table.html?utm_source=chatgpt.com
@@ -32,6 +32,6 @@ echo "FINISHED RUNNING ${model}$"
 # T5: t5-small, t5-base, t5-large
 #DONE: 
 #Pythia: 14m, 70m
-#TinyStories: 1m, 3m
-#GPT2:
+#TinyStories: 1m, 3m, 28m
+#GPT2: gpt2-small, gpt2-medium, gpt2-large, gpt2-xl
 #OPT: 

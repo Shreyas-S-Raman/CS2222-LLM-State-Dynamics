@@ -7,7 +7,7 @@ os.environ["HF_TOKEN"] = hf_key
 
 class Config:
     #base arguments overriden in evaluate_model.py
-    reduce_states = False
+    reduce_states = True
     model_name = 'pythia-14m'
     BASE_PATH = None
 

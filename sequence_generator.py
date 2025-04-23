@@ -22,19 +22,20 @@ class SequenceGenerator(ABC):
 
 
 class RandomLetterSequenceGenerator(SequenceGenerator):
-    def __init__(self, length:int=None, repeat_pattern_len:int=None, end_idx:int=None, randomize:bool=False):
+    def __init__(self, length:int=None, repeat_pattern_len:int=None, end_idx:int=None, randomize:bool=False, reduce_states: bool = False):
         super().__init__()
         self.randomize = randomize
         self.length = length
         self.repeat_pattern_len = repeat_pattern_len
         self.end_idx = end_idx
+        self.reduce_states = reduce_states
         assert self.end_idx < self.repeat_pattern_len if end_idx else True, "ERROR: end_idx must be less than repeat_pattern_len"
 
     def generate(self, seq_len:int=None, repeat_pattern_len:int=None):
         #NOTE: edges = seq_len / length | states = repeat_pattern_len
         repeat_pattern_len = repeat_pattern_len if self.repeat_pattern_len is None else self.repeat_pattern_len
         length = seq_len if self.length is None else self.length
-        base_pattern = random.choices(string.ascii_lowercase, k=repeat_pattern_len)
+        base_pattern = random.choices(string.ascii_lowercase, k=repeat_pattern_len) if not self.reduce_states else random.sample(string.ascii_lowercase, repeat_pattern_len)
         repeats = max((length) // repeat_pattern_len,1)
 
         pattern = base_pattern * repeats
@@ -87,40 +88,22 @@ class DFAStateActionSequenceGenerator(SequenceGenerator):
         self.dfa = dfa if dfa is not None else self._create_dfa(num_states=num_states, num_edges=num_edges, num_unique_actions=num_unique_actions, max_sink_nodes=max_sink_nodes)
         assert start_state is None or start_state in self.dfa, "ERROR: start state is not in the DFA"
         self.start_state = start_state
-    
-    def generate_with_curr_dfa(self, seq_len:int = None, start_state:str=None):
-        if start_state is not None:
-            curr_state = start_state
-        elif self.start_state is not None:
-            curr_state = self.start_state
-        else:
-            curr_state = random.choice(list(self.dfa.keys()))
-
-        num_steps = 0
-        sequence = []
-        while curr_state is not None and num_steps < seq_len:
-            sequence.append(curr_state)
-            num_steps += 1
-            
-            if self.dfa[curr_state]:
-                rand_action = random.choice(list(self.dfa[curr_state].keys()))
-                sequence.append(rand_action)
-                curr_state = self.dfa[curr_state][rand_action]
-            else:
-                break
-           
-        label = curr_state
-
-        return ' '.join(sequence) + ' ' if not self.reduce_states else ' '.join(sequence), label if not self.reduce_states else ' '+label
-
+   
     def generate(self, seq_len:int = None, start_state:str=None):
         self.dfa = self._create_dfa(num_states=self.num_states, num_edges=self.num_edges, num_unique_actions=self.num_unique_actions, max_sink_nodes=self.max_sink_nodes)
+        non_sink_states = [
+                state for state, action_state in self.dfa.items()
+                if not (len(action_state) == 1 and action_state[next(iter(action_state))] == None)
+            ]
         if start_state is not None:
+            start_state = start_state
             curr_state = start_state
         elif self.start_state is not None:
+            start_state = self.start_state
             curr_state = self.start_state
         else:
-            curr_state = random.choice(list(self.dfa.keys()))
+            start_state = random.choice(non_sink_states) if non_sink_states else random.choice(list(self.dfa.keys()))
+            curr_state = start_state
 
         num_steps = 0
         sequence = []
@@ -132,10 +115,21 @@ class DFAStateActionSequenceGenerator(SequenceGenerator):
                 rand_action = random.choice(list(self.dfa[curr_state].keys()))
                 sequence.append(rand_action)
                 curr_state = self.dfa[curr_state][rand_action]
+
+                #restart from initial start state if curr_state is None
+                if not curr_state:
+                    curr_state = start_state
             else:
                 break
         
         label = curr_state
+
+        #formulate the prompt
+        sequence_prompt = f"States: {{{','.join(self.states)}}}\nActions:{{{','.join(self.actions)}}}\nSequence: Start at state {start_state}."
+        for i in range(1, len(sequence)-1, 2):
+            sequence_prompt += f"Take action {sequence[i]}, go to state {sequence[i+1]}."
+        
+        sequence_prompt += f"Take action {sequence[i-1]}, go to state"
 
         return ' '.join(sequence) + ' ' if not self.reduce_states else ' '.join(sequence), label if not self.reduce_states else ' '+label
 
@@ -188,21 +182,42 @@ class DFAStateActionSequenceGenerator(SequenceGenerator):
         # Assign relevant actions to each edge
         distributed_edges = self._distribute_edges(num_edges=num_edges, num_states=num_states, max_sink_nodes=max_sink_nodes)
         dfa = {}  # {s1: {action: s2}}
+        
+        # Track unvisited states
+        unvisited_states = set(self.states)
 
         for i, num_out_edges in enumerate(distributed_edges):
+            # Remove the current state from unvisited states
+            unvisited_states.discard(self.states[i])
+
+            # Sample actions
             sampled_actions = random.sample(self.actions, num_out_edges)
-            sampled_states = random.choices(self.states, k=num_out_edges)
-            
+
+            # Sample states from unvisited states to avoid cycles
+            if unvisited_states:
+                sampled_states = random.sample(unvisited_states, min(num_out_edges, len(unvisited_states)))
+            else:
+                sampled_states = []
+
+            # If there are not enough unvisited states, fill the rest with any state
+            if len(sampled_states) < num_out_edges:
+                additional_states = random.choices(list(set(self.states) - {self.states[i]}), k=num_out_edges - len(sampled_states))
+                sampled_states.extend(additional_states)
+
             # Ensure each state has a complete set of actions
             dfa[self.states[i]] = {a: s for (a, s) in zip(sampled_actions, sampled_states)}
 
-            # Ensure each sink node has a self-looping edge
+            # Ensure each sink node has an edge to None
             if num_out_edges == 0:
-                if self.states[i] not in dfa:
-                    dfa[self.states[i]] = {}
                 if len(self.actions) > 0:
                     self_loop_action = random.choice(list(self.actions))
-                    dfa[self.states[i]][self_loop_action] = self.states[i]
+                    dfa[self.states[i]][self_loop_action] = None
+            # if num_out_edges == 0:
+            #     if self.states[i] not in dfa:
+            #         dfa[self.states[i]] = {}
+            #     if len(self.actions) > 0:
+            #         self_loop_action = random.choice(list(self.actions))
+            #         dfa[self.states[i]][self_loop_action] = self.states[i]
 
         return dfa
     
@@ -267,7 +282,11 @@ class DFAStateSequenceGenerator(SequenceGenerator):
         elif self.start_state is not None:
             curr_state = self.start_state
         else:
-            curr_state = random.choice(list(self.dfa.keys()))
+            non_sink_states = [
+                state for state, next_state in self.dfa.items()
+                if not (len(next_state) == 1 and next_state == None)
+            ]
+            curr_state = random.choice(non_sink_states) if non_sink_states else random.choice(list(self.dfa.keys()))
 
         num_steps = 0
         sequence = []
@@ -286,26 +305,39 @@ class DFAStateSequenceGenerator(SequenceGenerator):
 
     def generate(self, seq_len:int = None, start_state:str=None):
         self.dfa = self._create_dfa(num_states=self.num_states, num_edges=self.num_edges, max_sink_nodes=self.max_sink_nodes)
+        non_sink_states = [
+                state for state, next_state in self.dfa.items()
+                if not (next_state == None)
+            ]
         if start_state is not None:
+            start_state = start_state
             curr_state = start_state
         elif self.start_state is not None:
+            start_state = self.start_state
             curr_state = self.start_state
         else:
-            curr_state = random.choice(list(self.dfa.keys()))
+            start_state = random.choice(non_sink_states) if non_sink_states else random.choice(list(self.dfa.keys()))
+            curr_state = start_state
 
         num_steps = 0
         sequence = []
-        while curr_state is not None and num_steps < seq_len:
+        while num_steps < seq_len:
             sequence.append(curr_state)
+            if self.dfa[curr_state]:
+                label = set([s if not self.reduce_states else ' ' + s for s in self.dfa[curr_state]])
+            else:
+                label = set([start_state if not self.reduce_states else ' ' + start_state])
             num_steps += 1
             if self.dfa[curr_state]:
-                curr_state = random.sample(self.dfa[curr_state],1)[0]
+                next_state = random.sample(self.dfa[curr_state],1)[0]
+                #restart from initial start state if curr_state is None
+                curr_state = next_state
+                
             else:
-                break
-           
-        label = curr_state
+                curr_state = start_state
 
-        return ' '.join(sequence) + ' ' if not self.reduce_states else ' '.join(sequence), label if not self.reduce_states else ' '+label
+        
+        return ' '.join(sequence) + ' ' if not self.reduce_states else ' '.join(sequence), label
 
     def visualize_dfa(self):
         G = nx.DiGraph()
@@ -349,13 +381,30 @@ class DFAStateSequenceGenerator(SequenceGenerator):
         distributed_edges = self._distribute_edges(num_edges=num_edges, num_states=num_states, max_sink_nodes=max_sink_nodes)
         dfa = {}  # {s1: {action: s2}}
 
+        # Track unvisited states
+        unvisited_states = set(self.states)
+
         for i, num_out_edges in enumerate(distributed_edges):
-            sampled_states = random.choices(self.states, k=num_out_edges)
-            
-            dfa[self.states[i]] = set([s for s in sampled_states])
-            # Ensure each sink node has a self-looping edge
+            # Remove the current state from unvisited states
+            unvisited_states.discard(self.states[i])
+
+            # Sample states from unvisited states to avoid cycles
+            if unvisited_states:
+                sampled_states = random.sample(unvisited_states, min(num_out_edges, len(unvisited_states)))
+            else:
+                sampled_states = []
+
+            # If there are not enough unvisited states, fill the rest with any state
+            if len(sampled_states) < num_out_edges:
+                additional_states = random.choices(list(set(self.states) - {self.states[i]}), k=num_out_edges - len(sampled_states))
+                sampled_states.extend(additional_states)
+
+            # Ensure each state has a complete set of actions
+            dfa[self.states[i]] = set(sampled_states)
+
+            # Ensure each sink node has an edge to None
             if num_out_edges == 0:
-                dfa[self.states[i]] = set([self.states[i]])
+                dfa[self.states[i]] = None
 
         return dfa
     

@@ -29,36 +29,72 @@ class EvaluationPipeline:
         )
         self.seq_generator = sequence_generator
 
+    def update_sequence_generator(self, seq_gen):
+        self.sequence_generator = seq_gen
+
     def generate_and_classify_accuracy(self, num_samples:int=10, seq_len:int=10, detail=True, verbose=True):
         correct = 0
         correct_per_sample = []
         sequences = []
         labels = []
+        pred_label = []
 
         for _ in range(num_samples):
             sequence, label = self.seq_generator.generate(seq_len=seq_len)
-            if detail:
-                sequences.append(sequence)
-                labels.append(label)
+            
+            sequences.append(sequence)
+            labels.append(label)
             
             tokens = self.model.to_tokens(sequence, prepend_bos=True)
             logits, _ = self.model.run_with_cache(tokens)
             
             probs = torch.nn.functional.softmax(logits, dim=-1)[0, -1, :]
-            pred_label = torch.argmax(probs, axis=-1)
+            pred_label = torch.argmax(probs, dim=1)
             next_token = self.model.to_string(pred_label)
+            pred_label.append(next_token)
 
-            true_label = self.model.to_tokens(label, prepend_bos=False)
-            true_label = torch.squeeze(true_label)
-            if pred_label == true_label:
-                correct += 1
-                correct_per_sample.append(True)
+            for i in range(0, total_scenarios, batch_size): 
+                batch_prompt_tokens = prompt_tokens[i: i+batch_size]
+                batch_answer_tokens = answer_tokens[i: i+batch_size].squeeze()
+
+
+                last_token_logits = model(batch_prompt_tokens).logits[:, -1, :] 
+                predicted_token_ids = torch.argmax(last_token_logits, dim=1)
+
+                matches = (predicted_token_ids == batch_answer_tokens)
+                correct_predictions += matches.sum().item()
+            
+
+            if 'dfa' in dir(self.seq_generator) and 'skip_states' in dir(self.seq_generator):
+                # Convert true_label to a set of potential true labels
+                # Assuming label is a set of characters
+                true_label = [torch.squeeze(self.model.to_tokens(char, prepend_bos=False)).item() for char in label]
+
+                # Squeeze each token tensor and combine them into a single tensor
+                true_label_set = set(true_label)  # Assuming true_label is a tensor
+
+                # Check if the predicted label is within the set of true labels
+                if pred_label.item() in true_label_set:
+                    correct += 1
+                    correct_per_sample.append(True)
+                else:
+                    correct_per_sample.append(False)
             else:
-                correct_per_sample.append(False)
+                true_label = self.model.to_tokens(label, prepend_bos=False)
+                true_label = torch.squeeze(true_label)
+                if pred_label == true_label:
+                    correct += 1
+                    correct_per_sample.append(True)
+                else:
+                    correct_per_sample.append(False)
+            
+            
         if verbose:
             print('Sequence: ', sequence, 'Label: ', label, 'Pred: ', next_token)
+            if 'dfa' in dir(self.seq_generator):
+                print(self.seq_generator.dfa)
         dfas = [self.seq_generator.dfa if 'dfa' in dir(self.seq_generator) else None for _ in range(num_samples)]
-        return correct / num_samples, correct_per_sample, sequences, labels, dfas
+        return correct / num_samples, correct_per_sample, sequences, labels, pred_label, dfas
 
     def get_token_probabilities(self, seq_len:int):
         # Return probabilities of likely next tokens
@@ -174,28 +210,19 @@ def evaluate_dfa_stateaction_sequence(model_name:str, num_samples:int, init_stat
                                 )
                 eval_pipeline = EvaluationPipeline(model_name=model_name, sequence_generator=seq_generator)
                 
-                acc, correct_per_sample, sequences, labels, dfas = eval_pipeline.generate_and_classify_accuracy(num_samples=num_samples, seq_len=trans)
+                acc, correct_per_sample, sequences, labels, pred_label, dfas = eval_pipeline.generate_and_classify_accuracy(num_samples=num_samples, seq_len=trans)
                 
-                for (correct,s,l, d) in zip(correct_per_sample, sequences, labels, dfas):
+                for (correct,s,l, p, d) in zip(correct_per_sample, sequences, labels, pred_label, dfas):
                     
                     if correct:
-                        correct_output[state][trans][density].append([s, l])
+                        correct_output[state][trans][density].append([s, l, p])
                     else:
-                        incorrect_output[state][trans][density].append([s, l])
+                        incorrect_output[state][trans][density].append([s, l, p])
                     dfa_output[state][trans][density].append(d)
                 accuracy_heatmap[i][j][k] = acc
                 print(f"STATE {state} | TRANS {trans} | DENSITY {density} | ACCURACY: {acc*100}%")
-                
     
-    #save all the outputs and heatmaps
-    os.mkdir(os.path.join(Config.BASE_PATH, 'dfa_stateaction'))
-    with open(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'correct_dfa_stateaction.json'), 'w') as f:
-        json.dump(correct_output, f, indent=4)
-    with open(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'incorrect_dfa_stateaction.json'), 'w') as f:
-        json.dump(incorrect_output, f, indent=4)
-    with open(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'dfa_stateaction.pkl'), 'w') as f:
-        pickle.dump(dfa_output, f)
-   
+    os.makedirs(os.path.join(Config.BASE_PATH, 'dfa_stateaction'), exist_ok=True)
     # Get the shape of the heatmap
     num_states, num_transitions, density_intervals = accuracy_heatmap.shape
 
@@ -227,12 +254,33 @@ def evaluate_dfa_stateaction_sequence(model_name:str, num_samples:int, init_stat
         ax.set_yticks(np.arange(num_transitions))
         ax.set_xticklabels(np.arange(1, num_states + 1))
         ax.set_yticklabels(np.arange(1, num_transitions + 1))
+
+        # Annotate each cell with the accuracy value
+        for y in range(accuracy_slice.shape[0]):
+            for x in range(accuracy_slice.shape[1]):
+                ax.text(x, y, f"{accuracy_slice[y, x]:.2f}", ha='center', va='center', color='black', fontsize=5)
+        
+        #update plot tick labels based on the range of states and transitions
+        ax.set_xticks(np.arange(len(init_states + list(range(min_states, max_states, state_interval)))))
+        ax.set_xticklabels(init_states + list(range(min_states, max_states, state_interval)))
+        ax.set_yticks(np.arange(len(init_transitions + list(range(min_transitions, max_transitions, transition_interval)))))
+        ax.set_yticklabels(init_transitions + list(range(min_transitions, max_transitions, transition_interval)))
         
         # Save the plot
         plt.savefig(os.path.join(Config.BASE_PATH, 'dfa_stateaction', f"accuracy_dfastateaction_density_{density}.png"), dpi=300)
         plt.close()
 
     np.savez(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'accuracy_dfastateaction.npz'), array=accuracy_heatmap)
+    
+    #save all the outputs and heatmaps
+    with open(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'correct_dfa_stateaction.json'), 'w') as f:
+        json.dump(correct_output, f, indent=4)
+    with open(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'incorrect_dfa_stateaction.json'), 'w') as f:
+        json.dump(incorrect_output, f, indent=4)
+    with open(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'dfa_stateaction.pkl'), 'wb') as f:
+        pickle.dump(dfa_output, f)
+   
+    
 
 def evaluate_dfa_statestate_sequence(model_name:str, num_samples:int, init_states:list, init_transitions:list, max_states:int, min_states:int, state_interval:int, max_transitions:int, min_transitions:int, transition_interval:int, density_interval:int, reduce_states: bool=False):
     #tracking correct and incorrect outputs
@@ -275,27 +323,19 @@ def evaluate_dfa_statestate_sequence(model_name:str, num_samples:int, init_state
                                 )
                 eval_pipeline = EvaluationPipeline(model_name=model_name, sequence_generator=seq_generator)
                 
-                acc, correct_per_sample, sequences, labels, dfas = eval_pipeline.generate_and_classify_accuracy(num_samples=num_samples, seq_len=trans)
+                acc, correct_per_sample, sequences, labels, pred_label, dfas = eval_pipeline.generate_and_classify_accuracy(num_samples=num_samples, seq_len=trans)
                 
-                for (correct,s,l, d) in zip(correct_per_sample, sequences, labels, dfas):
+                for (correct,s,l,p,d) in zip(correct_per_sample, sequences, labels, pred_label, dfas):
                     if correct:
-                        correct_output[state][trans][density].append([s, l])
+                        correct_output[state][trans][density].append([s, list(l), p])
                     else:
-                        incorrect_output[state][trans][density].append([s, l])
+                        incorrect_output[state][trans][density].append([s, list(l), p])
                     dfa_output[state][trans][density].append(d)
                 accuracy_heatmap[i][j][k] = acc
                 print(f"STATE {state} | TRANS {trans} | DENSITY {density} | ACCURACY: {acc*100}%")
-                
     
-    #save all the outputs and heatmaps
-    os.mkdir(os.path.join(Config.BASE_PATH, 'dfa_statestate'))
-    with open(os.path.join(Config.BASE_PATH, 'dfa_statestate', 'correct_dfa_statestate.json'), 'w') as f:
-        json.dump(correct_output, f, indent=4)
-    with open(os.path.join(Config.BASE_PATH, 'dfa_statestate', 'incorrect_dfa_statestate.json'), 'w') as f:
-        json.dump(incorrect_output, f, indent=4)
-    with open(os.path.join(Config.BASE_PATH, 'dfa_statestate', 'dfa_statestate.pkl'), 'w') as f:
-        pickle.dump(dfa_output, f)
-   
+    
+    os.makedirs(os.path.join(Config.BASE_PATH, 'dfa_statestate'), exist_ok=True)
     # Get the shape of the heatmap
     num_states, num_transitions, density_intervals = accuracy_heatmap.shape
 
@@ -327,12 +367,33 @@ def evaluate_dfa_statestate_sequence(model_name:str, num_samples:int, init_state
         ax.set_yticks(np.arange(num_transitions))
         ax.set_xticklabels(np.arange(1, num_states + 1))
         ax.set_yticklabels(np.arange(1, num_transitions + 1))
+
+        # Annotate each cell with the accuracy value
+        for y in range(accuracy_slice.shape[0]):
+            for x in range(accuracy_slice.shape[1]):
+                ax.text(x, y, f"{accuracy_slice[y, x]:.2f}", ha='center', va='center', color='black', fontsize=5)
         
+        #update plot tick labels based on the range of states and transitions
+        ax.set_xticks(np.arange(len(init_states + list(range(min_states, max_states, state_interval)))))
+        ax.set_xticklabels(init_states + list(range(min_states, max_states, state_interval)))
+        ax.set_yticks(np.arange(len(init_transitions + list(range(min_transitions, max_transitions, transition_interval)))))
+        ax.set_yticklabels(init_transitions + list(range(min_transitions, max_transitions, transition_interval)))
+
         # Save the plot
         plt.savefig(os.path.join(Config.BASE_PATH, 'dfa_statestate', f"accuracy_dfa_statestate_density_{density}.png"), dpi=300)
         plt.close()
 
     np.savez(os.path.join(Config.BASE_PATH, 'dfa_statestate', 'accuracy_dfastatestate.npz'), array=accuracy_heatmap)
+    
+    #save all the outputs and heatmaps
+    with open(os.path.join(Config.BASE_PATH, 'dfa_statestate', 'correct_dfa_statestate.json'), 'w') as f:
+        json.dump(correct_output, f, indent=4)
+    with open(os.path.join(Config.BASE_PATH, 'dfa_statestate', 'incorrect_dfa_statestate.json'), 'w') as f:
+        json.dump(incorrect_output, f, indent=4)
+    with open(os.path.join(Config.BASE_PATH, 'dfa_statestate', 'dfa_statestate.pkl'), 'wb') as f:
+        pickle.dump(dfa_output, f)
+   
+    
 
 def evaluate_random_sequence(model_name:str, num_samples:int, init_states:list, init_transitions:list, max_states:int, min_states:int, state_interval:int, max_transitions:int, min_transitions:int, transition_interval:int):
     #tracking correct and incorrect outputs
@@ -347,7 +408,7 @@ def evaluate_random_sequence(model_name:str, num_samples:int, init_states:list, 
             seq_generator = RandomLetterSequenceGenerator(length=trans, repeat_pattern_len=state)
             eval_pipeline = EvaluationPipeline(model_name=model_name, sequence_generator=seq_generator)
 
-            acc, correct_per_sample, sequences, labels, __ = eval_pipeline.generate_and_classify_accuracy(num_samples=num_samples, seq_len=trans)
+            acc, correct_per_sample, sequences, labels, __, __ = eval_pipeline.generate_and_classify_accuracy(num_samples=num_samples, seq_len=trans)
 
             for (correct,s,l) in zip(correct_per_sample, sequences, labels):
                 if state not in correct_output:
@@ -368,7 +429,7 @@ def evaluate_random_sequence(model_name:str, num_samples:int, init_states:list, 
             accuracy_heatmap[i][j] = acc
             print(f"STATE {state} | TRANS {trans} | ACCURACY: {acc*100}%")
             
-    os.mkdir(os.path.join(Config.BASE_PATH, 'random'))
+    os.makedirs(os.path.join(Config.BASE_PATH, 'random'), exist_ok=True)
     #save all the outputs and heatmaps
     with open(os.path.join(Config.BASE_PATH, 'random', 'correct_random_letter.json'), 'w') as f:
         json.dump(correct_output, f, indent=4)
@@ -376,9 +437,9 @@ def evaluate_random_sequence(model_name:str, num_samples:int, init_states:list, 
         json.dump(incorrect_output, f, indent=4)
     
     # Optional: label the rows and columns
-    row_labels = init_states + [state for state in range(min_states, max_states, state_interval)]
-    col_labels = init_transitions + [trans for trans in range(min_transitions, max_transitions, transition_interval)]
-    df = pd.DataFrame(accuracy_heatmap, index=row_labels, columns=col_labels)
+    state_labels = init_states + [state for state in range(min_states, max_states, state_interval)]
+    trans_labels = init_transitions + [trans for trans in range(min_transitions, max_transitions, transition_interval)]
+    df = pd.DataFrame(accuracy_heatmap, index=trans_labels, columns=state_labels)
 
     # Plot and save heatmap
     plt.figure(figsize=(8, 8))
@@ -386,8 +447,8 @@ def evaluate_random_sequence(model_name:str, num_samples:int, init_states:list, 
     colorbar = ax.collections[0].colorbar
     colorbar.set_label('Accuracy')
     plt.title(f"Random Sequence | {model_name}")
-    plt.xlabel("Number of Transitions")
-    plt.ylabel("Number of States")
+    plt.xlabel("Number of States")
+    plt.ylabel("Number of Transitions")
     plt.savefig(os.path.join(Config.BASE_PATH,'random', "accuracy_random_letter.png"), dpi=300)
     plt.close()
 
