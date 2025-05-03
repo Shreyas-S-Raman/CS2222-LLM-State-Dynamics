@@ -17,6 +17,15 @@ from matplotlib.colors import Normalize
 from matplotlib.cm import ScalarMappable, viridis
 import pdb 
 from tqdm import tqdm
+import random
+# same_action_diff_start = "Start at state {x1}. Take action {X1}, go to state {x3}. Take action {X3}, go to state {x2}. Take action {X1}, go to state {x4}. Take action {X2}, go to state {x1}. Take action {X1}, go to state"
+# noop_distractors = []
+from rich.progress import track
+from functools import partial
+from typing import Float
+import plotly.io as pio
+
+
 
 class EvaluationPipeline:
     def __init__(self, model_name:str, sequence_generator):
@@ -30,59 +39,48 @@ class EvaluationPipeline:
         self.seq_generator = sequence_generator
 
     def update_sequence_generator(self, seq_gen):
-        self.sequence_generator = seq_gen
+        self.seq_generator = seq_gen
 
     def generate_and_classify_accuracy(self, num_samples:int=10, seq_len:int=10, detail=True, verbose=True):
         correct = 0
         correct_per_sample = []
         sequences = []
-        labels = []
-        pred_label = []
+        label_tokens = []
+        pred_tokens = []
 
         for _ in range(num_samples):
-            sequence, label = self.seq_generator.generate(seq_len=seq_len)
+            sequence, label_token = self.seq_generator.generate(seq_len=seq_len)
             
             sequences.append(sequence)
-            labels.append(label)
+            label_tokens.append(label_token)
             
-            tokens = self.model.to_tokens(sequence, prepend_bos=True)
+            tokens = self.model.to_tokens(sequence, prepend_bos=True).to("cuda")
             logits, _ = self.model.run_with_cache(tokens)
             
-            probs = torch.nn.functional.softmax(logits, dim=-1)[0, -1, :]
-            pred_label = torch.argmax(probs, dim=1)
-            next_token = self.model.to_string(pred_label)
-            pred_label.append(next_token)
-
-            for i in range(0, total_scenarios, batch_size): 
-                batch_prompt_tokens = prompt_tokens[i: i+batch_size]
-                batch_answer_tokens = answer_tokens[i: i+batch_size].squeeze()
-
-
-                last_token_logits = model(batch_prompt_tokens).logits[:, -1, :] 
-                predicted_token_ids = torch.argmax(last_token_logits, dim=1)
-
-                matches = (predicted_token_ids == batch_answer_tokens)
-                correct_predictions += matches.sum().item()
+            # probs = torch.nn.functional.softmax(logits, dim=-1)[0, -1, :]
+            pred_token_id = torch.argmax(logits[0,-1,:], dim=-1)
+            pred_token = self.model.to_string(pred_token_id)
+            pred_tokens.append(pred_token)
             
 
-            if 'dfa' in dir(self.seq_generator) and 'skip_states' in dir(self.seq_generator):
-                # Convert true_label to a set of potential true labels
-                # Assuming label is a set of characters
-                true_label = [torch.squeeze(self.model.to_tokens(char, prepend_bos=False)).item() for char in label]
-
-                # Squeeze each token tensor and combine them into a single tensor
-                true_label_set = set(true_label)  # Assuming true_label is a tensor
-
-                # Check if the predicted label is within the set of true labels
-                if pred_label.item() in true_label_set:
+            if 'dfa' in dir(self.seq_generator) and 'skip_actions' in dir(self.seq_generator):
+                label_token_id = self.model.to_tokens(label_token, prepend_bos=False)
+                label_token_id = torch.squeeze(label_token_id)
+                if pred_token_id.item() == label_token_id.item():
                     correct += 1
                     correct_per_sample.append(True)
                 else:
                     correct_per_sample.append(False)
             else:
-                true_label = self.model.to_tokens(label, prepend_bos=False)
-                true_label = torch.squeeze(true_label)
-                if pred_label == true_label:
+                # Convert true_label to a set of potential true labels
+                # Assuming label is a set of characters
+                label_token_ids = [torch.squeeze(self.model.to_tokens(char, prepend_bos=False)).item() for char in label_token]
+
+                # Squeeze each token tensor and combine them into a single tensor
+                label_token_ids_set = set(label_token_ids)  # Assuming true_label is a tensor
+
+                # Check if the predicted label is within the set of true labels
+                if pred_token_id.item() in label_token_ids_set:
                     correct += 1
                     correct_per_sample.append(True)
                 else:
@@ -90,11 +88,11 @@ class EvaluationPipeline:
             
             
         if verbose:
-            print('Sequence: ', sequence, 'Label: ', label, 'Pred: ', next_token)
+            print('Sequence: ', sequence, 'Label:', label_token, 'Pred:', pred_token)
             if 'dfa' in dir(self.seq_generator):
                 print(self.seq_generator.dfa)
         dfas = [self.seq_generator.dfa if 'dfa' in dir(self.seq_generator) else None for _ in range(num_samples)]
-        return correct / num_samples, correct_per_sample, sequences, labels, pred_label, dfas
+        return correct / num_samples, correct_per_sample, sequences, label_tokens, pred_tokens, dfas
 
     def get_token_probabilities(self, seq_len:int):
         # Return probabilities of likely next tokens
@@ -168,6 +166,192 @@ class EvaluationPipeline:
         log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
         return logits, log_probs
 
+    def normalize_patched_logit_diff(patched_logit_diff, corrupted_average_logit_diff, original_average_logit_diff) -> torch.Tensor: #a single item tensor (a number):
+        # Subtract corrupted logit diff to measure the improvement, divide by the original - corrupted
+        # 0 means zero change, negative means actively made worse, 1 means totally recovered clean performance, >1 means actively *improved* on clean performance
+
+        return (patched_logit_diff - corrupted_average_logit_diff).item()/(original_average_logit_diff - corrupted_average_logit_diff).item()
+
+    def patch_residual_component(
+        corrupted_residual_component,
+        hook,
+        pos_index: int, #the position in the sequence that you want to patch
+        clean_cache: ActivationCache) -> torch.Tensor:
+        #simply overwrite the corrupted_residual_component at the pos_index with that from the clean cache
+        #hint: you can key the clean_cache with hook.name
+
+        corrupted_residual_component[:, pos_index,:] = clean_cache[hook.name][:, pos_index,:]
+        return corrupted_residual_component
+
+
+    def create_patching_heatmap(self, tokens: list[int], cache: ActivationCache, corrupted_tokens, answer_tokens, corrupted_average_logit_diff, original_average_logit_diff, filename):
+
+        n_tokens = len(tokens)
+
+        n_layers = self.model.cfg.n_layers
+
+        #Populate a heatmap of patched logit differences
+        patched_positions = np.zeros((n_layers, n_tokens))
+
+        for layer in track(list(range(n_layers))):
+            for i, pos in enumerate(tokens):
+                hook_fn = partial(self.patch_residual_component, pos_index = pos, clean_cache = cache)
+                patched_logits = self.model.run_with_hooks(
+                    corrupted_tokens,
+                    fwd_hooks = [(utils.get_act_name('resid_pre', layer), hook_fn)],
+                    return_type='logits'
+                )
+                diff = ((patched_logits[0, -1, answer_tokens[0][0]]-patched_logits[0, -1, answer_tokens[0][1]]) + (patched_logits[1, -1, answer_tokens[1][0]]-patched_logits[1, -1, answer_tokens[1][1]]))/ 2    
+                patched_positions[layer, i] = self.normalize_patched_logit_diff(patched_logit_diff=diff, corrupted_average_logit_diff=corrupted_average_logit_diff, original_average_logit_diff=original_average_logit_diff)
+        
+        all_positions = [f"{tok}_{i}" for i, tok in enumerate(self.model.to_str_tokens(tokens[0]))]
+        prompt_position_labels = []
+        for tok in tokens:
+            prompt_position_labels.append(all_positions[tok])
+        fig = px.imshow(patched_positions, labels={'x':'Position', 'y':"Layer"}, x=prompt_position_labels, title="Logit difference when patching residual streams at different positions/layers")
+        fig.write_image(filename)
+
+    def evaluate_noop_dfa(self, num_transitions: list[int], start_state: str, second_state: str, A1: str, A2: str, noop_action_set: set, num_trials: int, num_saved_samples: int):
+        initial_transition = "Start at state {x1}. Take action {A1}, go to state {x2}. Take action {A2}, go to state {x1}."
+        noop_buffer = "Take action {A}, go to state {x1}."
+        final_action = "Take action {A1}, go to state" 
+
+        mean_logit_diffs = []
+        saved_samples = num_saved_samples
+
+        for trans in num_transitions:
+            mean_logit_diff = 0
+            for _ in range(num_trials):
+                multi_noop_buffer = [noop_buffer.format(A=random.sample(noop_action_set,1), x1=start_state)]*(trans-2)
+                multi_noop_buffer = ' '.join(multi_noop_buffer)
+
+                prompt = ' '.join([initial_transition.format(x1=start_state, A1=A1, A2=A2, x2=second_state), multi_noop_buffer, final_action.format(A1=A1)])
+                counterfactual_prompt = ' '.join([initial_transition.format(x1=second_state, A1=A2, A2=A1, x2=start_state), multi_noop_buffer, final_action.format(A1=A2)])
+                
+                tokens = self.model.to_tokens([prompt, counterfactual_prompt], prepend_bos=True).to("cuda")
+                logits, cache = self.model.run_with_cache(tokens, return_type="logits")
+
+
+                answers = [(f" {second_state}", f' {start_state}'), (f" {start_state}", f" {second_state}")]
+                answer_tokens = []
+                for a in answers:
+                    answer_tokens.append((self.model.to_single_token(a[0]), self.model.to_single_token(a[1]),))
+
+                logit_diff = ((logits[0, -1, answer_tokens[0][0]]-logits[0, -1, answer_tokens[0][1]]) + (logits[1, -1, answer_tokens[1][0]]-logits[1, -1, answer_tokens[1][1]]))/ 2    
+                
+                if random.random() >= 0.5 and saved_samples > 0:
+                    corrupted_tokens = self.model.to_tokens([counterfactual_prompt, prompt], prepend_bos=True).to("cuda")
+                    corrupted_logits, __ = self.model.run_with_cache(corrupted_tokens, return_type="logits")
+
+                    corrupted_logit_diff = ((corrupted_logits[0, -1, answer_tokens[0][0]]-corrupted_logits[0, -1, answer_tokens[0][1]]) + (corrupted_logits[1, -1, answer_tokens[1][0]]-corrupted_logits[1, -1, answer_tokens[1][1]]))/ 2    
+
+
+                    self.create_patching_heatmap(tokens = Config.tokens_for_noop, cache=cache, corrupted_tokens=corrupted_tokens, answer_tokens=answer_tokens, corrupted_average_logit_diff=corrupted_logit_diff, original_average_logit_diff=logit_diff, filename=os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'noop_logitdiff_heatmap.png'))
+
+
+                    saved_samples -= 1
+
+
+
+                mean_logit_diff+= logit_diff
+            
+            mean_logit_diffs.append(mean_logit_diff/num_trials)
+        
+        '''
+        PLOT 4: Plot the mean logit diffs chart as number of transitions increase
+        '''
+        plt.plot(num_transitions, mean_logit_diffs)
+        plt.xlabel('Number of Transitions')
+        plt.ylabel('Mean Logit Differences')
+        plt.title('Plot of Mean Logit Differences vs. Number of Transitions')
+        # Save the figure
+        plt.savefig(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'noop_logitdiff.png'))
+
+
+        '''
+        PLOT 5: Plot logit difference heatmap from lab
+        '''
+        return mean_logit_diffs
+    
+    def evaluate_diff_state_same_action(self, x1:str, x2: str, x3: str, x4: str, A1: str, A2: str, A3: str, num_transitions: list[int], num_trials: int, num_saved_samples: int):
+
+        assert num_transitions%4 == 2, "num_transitions has to give remainder 2 when div by 4"
+
+        init_state = "Start at state {x1}."
+        target_loop = "Take action {A1}, go to state {x3}. Take action {A2}, go to state {x1}."
+        transition_to_distractor_loop = "Take action {A1}, go to state {x3}. Take action {A3}, go to state {x2}."
+        distractor_loop = "Take action {A1}, go to state {x4}. Take action {A2}, go to state {x2}."
+        transition_to_target_loop = "Take action {A1}, go to state {x4}. Take action {A3}, go to state {x1}."
+        final_action = "Take action {A1}, go to state"
+
+        mean_logit_diffs = []
+        saved_samples = num_saved_samples
+
+        for trans in num_transitions:
+            mean_logit_diff = 0
+            for _ in range(num_trials):
+                prompt = [init_state.format(x1)]
+                counterfactual_prompt = [init_state.format(x1)]
+                for i in range(0, trans, 2):
+                    counterfactual_prompt.append(target_loop.format(x1=x1, A1=A1, x3=x3, A2=A2))
+                    
+                    if (i//2) % 2 == 0:
+                        #0, 8 -> 0, 4
+                        prompt.append(target_loop.format(x1=x1, A1=A1, x3=x3, A2=A2))
+                    if (i//2) % 2 == 1:
+                        #2, 10 -> 1, 5
+                        prompt.append(transition_to_distractor_loop.format(A3=A3, A1=A1, x3=x3, x2=x2))
+                    if (i//2) % 2 == 2:
+                        #4, 12 -> 2, 6
+                        prompt.append(distractor_loop.format(x4=x4, A1=A1, x2=x2, A2=A2))
+                    if (i//2) % 2 == 3:
+                        #6, 14 -> 3, 7
+                        prompt.append(transition_to_target_loop.format(A3=A3, A1=A1, x4=x4, x1=x1))
+
+                prompt = ' '.join(prompt + [final_action.format(A1=A1)])
+                counterfactual_prompt = ' '.join(counterfactual_prompt + [final_action.format(A1=A1)])
+
+                tokens = self.model.to_tokens([prompt, counterfactual_prompt], prepend_bos=True).to("cuda")
+                logits, cache = self.model.run_with_cache(tokens, return_type="logits")
+
+                answers = [(f" {x3}", f' {x4}'), (f" {x3}", f" {x4}")]
+                answer_tokens = []
+                for a in answers:
+                    answer_tokens.append((self.model.to_single_token(a[0]), self.model.to_single_token(a[1]),))
+                logit_diff = ((logits[0, -1, answer_tokens[0][0]]-logits[0, -1, answer_tokens[0][1]]) + (logits[1, -1, answer_tokens[1][0]]-logits[1, -1, answer_tokens[1][1]]))/ 2    
+
+                if random.random() >= 0.5 and saved_samples > 0:
+                    corrupted_tokens = self.model.to_tokens([counterfactual_prompt, prompt], prepend_bos=True).to("cuda")
+                    corrupted_logits, ___ = self.model.run_with_cache(corrupted_tokens, return_type="logits")
+
+                    corrupted_logit_diff = ((corrupted_logits[0, -1, answer_tokens[0][0]]-corrupted_logits[0, -1, answer_tokens[0][1]]) + (corrupted_logits[1, -1, answer_tokens[1][0]]-corrupted_logits[1, -1, answer_tokens[1][1]]))/ 2    
+
+                    self.create_patching_heatmap(tokens = Config.tokens_for_diffstate_sameaction, cache=cache, corrupted_tokens=corrupted_tokens, answer_tokens=answer_tokens, corrupted_average_logit_diff=corrupted_logit_diff, original_average_logit_diff=logit_diff, filename=os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'diffstate_sameaction_logitdiff_heatmap.png'))
+
+
+                    saved_samples -= 1
+
+                
+                mean_logit_diff += logit_diff
+            mean_logit_diffs.append(mean_logit_diff/num_trials)
+        
+        '''
+        PLOT 4: Plot the mean logit diffs chart as number of transitions increase
+        '''
+        plt.plot(num_transitions, mean_logit_diffs)
+        plt.xlabel('Number of Transitions')
+        plt.ylabel('Mean Logit Differences')
+        plt.title('Plot of Mean Logit Differences vs. Number of Transitions')
+        # Save the figure
+        plt.savefig(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'diff_state_same_action_logitdiff.png'))
+
+        '''
+        PLOT 5: Plot logit difference heatmap from lab
+        '''
+        return mean_logit_diffs
+
+
+
 def evaluate_dfa_stateaction_sequence(model_name:str, num_samples:int, init_states:list, init_transitions:list, max_states:int, min_states:int, state_interval:int, max_transitions:int, min_transitions:int, transition_interval:int, density_interval:int, reduce_states: bool=False):
      #tracking correct and incorrect outputs
     correct_output = {}
@@ -175,6 +359,8 @@ def evaluate_dfa_stateaction_sequence(model_name:str, num_samples:int, init_stat
     dfa_output = {}
     #track 3D heatmaps of accuracy for DFA state action environment
     accuracy_heatmap = np.zeros((len(init_states)+(max_states-min_states)//state_interval, len(init_transitions) + (max_transitions-min_transitions)//transition_interval, density_interval))
+
+    eval_pipeline = EvaluationPipeline(model_name=model_name, sequence_generator=None)
 
     for i, state in tqdm(enumerate(init_states + list(range(min_states, max_states, state_interval)))):
         for j, trans in enumerate(init_transitions + list(range(min_transitions, max_transitions, transition_interval))):
@@ -208,8 +394,8 @@ def evaluate_dfa_stateaction_sequence(model_name:str, num_samples:int, init_stat
                                 max_sink_nodes=1,
                                 reduce_states = reduce_states
                                 )
-                eval_pipeline = EvaluationPipeline(model_name=model_name, sequence_generator=seq_generator)
                 
+                eval_pipeline.update_sequence_generator(seq_generator)
                 acc, correct_per_sample, sequences, labels, pred_label, dfas = eval_pipeline.generate_and_classify_accuracy(num_samples=num_samples, seq_len=trans)
                 
                 for (correct,s,l, p, d) in zip(correct_per_sample, sequences, labels, pred_label, dfas):
@@ -222,56 +408,9 @@ def evaluate_dfa_stateaction_sequence(model_name:str, num_samples:int, init_stat
                 accuracy_heatmap[i][j][k] = acc
                 print(f"STATE {state} | TRANS {trans} | DENSITY {density} | ACCURACY: {acc*100}%")
     
-    os.makedirs(os.path.join(Config.BASE_PATH, 'dfa_stateaction'), exist_ok=True)
-    # Get the shape of the heatmap
-    num_states, num_transitions, density_intervals = accuracy_heatmap.shape
+    generate_all_accuracy_plots(accuracy_heatmap=accuracy_heatmap, init_transitions=init_transitions, min_transitions=min_transitions, max_transitions=max_transitions, transition_interval=transition_interval, init_states=init_states, min_states=min_states, max_states=max_states, state_interval=state_interval, dfa_type='dfa_stateaction')
 
-    # Create a figure for each density interval
-    for i, density in  enumerate([0.0, 0.5, 1.0]):
-        fig, ax = plt.subplots(figsize=(8, 6))
-        
-        # Extract the 2D slice for the current density interval
-        accuracy_slice = accuracy_heatmap[:, :, i]
-        
-        # Normalize the accuracy values for color mapping
-        norm = Normalize(vmin=accuracy_slice.min(), vmax=accuracy_slice.max())
-        colors = viridis(norm(accuracy_slice))
-        
-        # Plot the heatmap
-        cax = ax.imshow(accuracy_slice, cmap=viridis, norm=norm, origin='lower')
-        
-        # Add color bar
-        cbar = fig.colorbar(cax, ax=ax, pad=0.1)
-        cbar.set_label('Accuracy')
-        
-        # Set labels and title
-        ax.set_title(f"Density Interval {density}")
-        ax.set_xlabel("Number of States")
-        ax.set_ylabel("Number of Transitions")
-        
-        # Set ticks
-        ax.set_xticks(np.arange(num_states))
-        ax.set_yticks(np.arange(num_transitions))
-        ax.set_xticklabels(np.arange(1, num_states + 1))
-        ax.set_yticklabels(np.arange(1, num_transitions + 1))
 
-        # Annotate each cell with the accuracy value
-        for y in range(accuracy_slice.shape[0]):
-            for x in range(accuracy_slice.shape[1]):
-                ax.text(x, y, f"{accuracy_slice[y, x]:.2f}", ha='center', va='center', color='black', fontsize=5)
-        
-        #update plot tick labels based on the range of states and transitions
-        ax.set_xticks(np.arange(len(init_states + list(range(min_states, max_states, state_interval)))))
-        ax.set_xticklabels(init_states + list(range(min_states, max_states, state_interval)))
-        ax.set_yticks(np.arange(len(init_transitions + list(range(min_transitions, max_transitions, transition_interval)))))
-        ax.set_yticklabels(init_transitions + list(range(min_transitions, max_transitions, transition_interval)))
-        
-        # Save the plot
-        plt.savefig(os.path.join(Config.BASE_PATH, 'dfa_stateaction', f"accuracy_dfastateaction_density_{density}.png"), dpi=300)
-        plt.close()
-
-    np.savez(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'accuracy_dfastateaction.npz'), array=accuracy_heatmap)
-    
     #save all the outputs and heatmaps
     with open(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'correct_dfa_stateaction.json'), 'w') as f:
         json.dump(correct_output, f, indent=4)
@@ -280,7 +419,6 @@ def evaluate_dfa_stateaction_sequence(model_name:str, num_samples:int, init_stat
     with open(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'dfa_stateaction.pkl'), 'wb') as f:
         pickle.dump(dfa_output, f)
    
-    
 
 def evaluate_dfa_statestate_sequence(model_name:str, num_samples:int, init_states:list, init_transitions:list, max_states:int, min_states:int, state_interval:int, max_transitions:int, min_transitions:int, transition_interval:int, density_interval:int, reduce_states: bool=False):
     #tracking correct and incorrect outputs
@@ -289,6 +427,7 @@ def evaluate_dfa_statestate_sequence(model_name:str, num_samples:int, init_state
     dfa_output = {}
     #track 3D heatmaps of accuracy for DFA state action environment
     accuracy_heatmap = np.zeros((len(init_states)+(max_states-min_states)//state_interval, len(init_transitions) + (max_transitions-min_transitions)//transition_interval, density_interval))
+    eval_pipeline = EvaluationPipeline(model_name=model_name, sequence_generator=None)
 
     for i, state in tqdm(enumerate(init_states + list(range(min_states, max_states, state_interval)))):
         for j, trans in enumerate(init_transitions + list(range(min_transitions, max_transitions, transition_interval))):
@@ -321,8 +460,7 @@ def evaluate_dfa_statestate_sequence(model_name:str, num_samples:int, init_state
                                 max_sink_nodes=1,
                                 reduce_states = reduce_states
                                 )
-                eval_pipeline = EvaluationPipeline(model_name=model_name, sequence_generator=seq_generator)
-                
+                eval_pipeline.update_sequence_generator(seq_generator)
                 acc, correct_per_sample, sequences, labels, pred_label, dfas = eval_pipeline.generate_and_classify_accuracy(num_samples=num_samples, seq_len=trans)
                 
                 for (correct,s,l,p,d) in zip(correct_per_sample, sequences, labels, pred_label, dfas):
@@ -334,8 +472,21 @@ def evaluate_dfa_statestate_sequence(model_name:str, num_samples:int, init_state
                 accuracy_heatmap[i][j][k] = acc
                 print(f"STATE {state} | TRANS {trans} | DENSITY {density} | ACCURACY: {acc*100}%")
     
+    generate_all_accuracy_plots(accuracy_heatmap=accuracy_heatmap, init_transitions=init_transitions, min_transitions=min_transitions, max_transitions=max_transitions, transition_interval=transition_interval, init_states=init_states, min_states=min_states, max_states=max_states, state_interval=state_interval, dfa_type='dfa_statestate')
     
-    os.makedirs(os.path.join(Config.BASE_PATH, 'dfa_statestate'), exist_ok=True)
+    
+    #save all the outputs and heatmaps
+    with open(os.path.join(Config.BASE_PATH, 'dfa_statestate', 'correct_dfa_statestate.json'), 'w') as f:
+        json.dump(correct_output, f, indent=4)
+    with open(os.path.join(Config.BASE_PATH, 'dfa_statestate', 'incorrect_dfa_statestate.json'), 'w') as f:
+        json.dump(incorrect_output, f, indent=4)
+    with open(os.path.join(Config.BASE_PATH, 'dfa_statestate', 'dfa_statestate.pkl'), 'wb') as f:
+        pickle.dump(dfa_output, f)
+   
+
+def generate_all_accuracy_plots(accuracy_heatmap, init_transitions, min_transitions, max_transitions, transition_interval, init_states, min_states, max_states, state_interval, dfa_type):
+    os.makedirs(os.path.join(Config.BASE_PATH, dfa_type), exist_ok=True)
+    '''PLOT 1: General Accuracy'''
     # Get the shape of the heatmap
     num_states, num_transitions, density_intervals = accuracy_heatmap.shape
 
@@ -344,7 +495,7 @@ def evaluate_dfa_statestate_sequence(model_name:str, num_samples:int, init_state
         fig, ax = plt.subplots(figsize=(8, 6))
         
         # Extract the 2D slice for the current density interval
-        accuracy_slice = accuracy_heatmap[:, :, i]
+        accuracy_slice = accuracy_heatmap[:, :, i].T
         
         # Normalize the accuracy values for color mapping
         norm = Normalize(vmin=accuracy_slice.min(), vmax=accuracy_slice.max())
@@ -359,14 +510,9 @@ def evaluate_dfa_statestate_sequence(model_name:str, num_samples:int, init_state
         
         # Set labels and title
         ax.set_title(f"Density Interval {density}")
-        ax.set_xlabel("Number of States")
         ax.set_ylabel("Number of Transitions")
+        ax.set_xlabel("Number of State")
         
-        # Set ticks
-        ax.set_xticks(np.arange(num_states))
-        ax.set_yticks(np.arange(num_transitions))
-        ax.set_xticklabels(np.arange(1, num_states + 1))
-        ax.set_yticklabels(np.arange(1, num_transitions + 1))
 
         # Annotate each cell with the accuracy value
         for y in range(accuracy_slice.shape[0]):
@@ -374,26 +520,99 @@ def evaluate_dfa_statestate_sequence(model_name:str, num_samples:int, init_state
                 ax.text(x, y, f"{accuracy_slice[y, x]:.2f}", ha='center', va='center', color='black', fontsize=5)
         
         #update plot tick labels based on the range of states and transitions
-        ax.set_xticks(np.arange(len(init_states + list(range(min_states, max_states, state_interval)))))
-        ax.set_xticklabels(init_states + list(range(min_states, max_states, state_interval)))
         ax.set_yticks(np.arange(len(init_transitions + list(range(min_transitions, max_transitions, transition_interval)))))
         ax.set_yticklabels(init_transitions + list(range(min_transitions, max_transitions, transition_interval)))
-
+        ax.set_xticks(np.arange(len(init_states + list(range(min_states, max_states, state_interval)))))
+        ax.set_xticklabels(init_states + list(range(min_states, max_states, state_interval)))
+        
         # Save the plot
-        plt.savefig(os.path.join(Config.BASE_PATH, 'dfa_statestate', f"accuracy_dfa_statestate_density_{density}.png"), dpi=300)
+        path = f'./{Config.model_name}' if not Config.reduce_states else f'./{Config.model_name}_reduced'
+        Config.BASE_PATH = os.path.relpath(path)
+        plt.savefig(os.path.join(Config.BASE_PATH, dfa_type, f"accuracy_{dfa_type}_density_{density}.png"), dpi=300)
         plt.close()
 
-    np.savez(os.path.join(Config.BASE_PATH, 'dfa_statestate', 'accuracy_dfastatestate.npz'), array=accuracy_heatmap)
+    '''PLOT 2: Difference from random chance'''
+    # Get the shape of the heatmap for diff from random
+    num_states, num_transitions, density_intervals = accuracy_heatmap.shape
+
+    # Create a figure for each density interval
+    for i, density in  enumerate([0.0, 0.5, 1.0]):
+        fig, ax = plt.subplots(figsize=(8, 6))
+        
+        # Extract the 2D slice for the current density interval
+        accuracy_diff_slice = accuracy_heatmap[:, :, i] - np.array([1/(i+1) for i in range(len(accuracy_heatmap.shape[0]))])
+        accuracy_diff_slice = accuracy_diff_slice.T
+        
+        # Plot the heatmap
+        cax = ax.imshow(accuracy_diff_slice, cmap=viridis, norm=norm, origin='lower')
+        
+        # Add color bar
+        cbar = fig.colorbar(cax, ax=ax, pad=0.1)
+        cbar.set_label('Accuracy Diff')
+        
+        # Set labels and title
+        ax.set_title(f"Density Interval {density}")
+        ax.set_xlabel("Number of Transitions")
+        ax.set_ylabel("Number of State")
+        
+
+        # Annotate each cell with the accuracy value
+        for y in range(accuracy_diff_slice.shape[0]):
+            for x in range(accuracy_diff_slice.shape[1]):
+                ax.text(x, y, f"{accuracy_diff_slice[y, x]:.2f}", ha='center', va='center', color='black', fontsize=5)
+        
+        #update plot tick labels based on the range of states and transitions
+        ax.set_xticks(np.arange(len(init_transitions + list(range(min_transitions, max_transitions, transition_interval)))))
+        ax.set_xticklabels(init_transitions + list(range(min_transitions, max_transitions, transition_interval)))
+        ax.set_yticks(np.arange(len(init_states + list(range(min_states, max_states, state_interval)))))
+        ax.set_yticklabels(init_states + list(range(min_states, max_states, state_interval)))
+        
+        # Save the plot
+        path = f'./{Config.model_name}' if not Config.reduce_states else f'./{Config.model_name}_reduced'
+        Config.BASE_PATH = os.path.relpath(path)
+        plt.savefig(os.path.join(Config.BASE_PATH, dfa_type, f"accuracy_{dfa_type}_density_{density}_diff.png"), dpi=300)
+        plt.close()
+
+    np.savez(os.path.join(Config.BASE_PATH, dfa_type, f'accuracy_{dfa_type}.npz'), array=accuracy_heatmap)
     
-    #save all the outputs and heatmaps
-    with open(os.path.join(Config.BASE_PATH, 'dfa_statestate', 'correct_dfa_statestate.json'), 'w') as f:
-        json.dump(correct_output, f, indent=4)
-    with open(os.path.join(Config.BASE_PATH, 'dfa_statestate', 'incorrect_dfa_statestate.json'), 'w') as f:
-        json.dump(incorrect_output, f, indent=4)
-    with open(os.path.join(Config.BASE_PATH, 'dfa_statestate', 'dfa_statestate.pkl'), 'wb') as f:
-        pickle.dump(dfa_output, f)
-   
+    '''PLOT 3: Line graph vs random chance'''
+    accuracy_array = accuracy_array[:,:,1]*100
+
+    # Plot random baseline
+    baseline = [100 / n for n in init_states + list(range(min_states, max_states, state_interval))]
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(init_states + list(range(min_states, max_states, state_interval)), baseline, '--', color='gray', label='Random Baseline', alpha=0.7)
     
+    # Color map for transition curves
+    colors = plt.cm.viridis(np.linspace(0, 1, len(init_transitions + list(range(min_transitions, max_transitions, transition_interval)))))
+    
+    # Plot accuracy curves for each transition count
+    for i, num_transitions in enumerate(init_transitions + list(range(min_transitions, max_transitions, transition_interval))):
+        if i%2 != 0:
+            continue
+        ax.plot(
+            init_states + list(range(min_states, max_states, state_interval)), 
+            accuracy_array[:,i], 
+            'o-', 
+            color=colors[i], 
+            label=f'{num_transitions} Transition{"s" if num_transitions > 1 else ""}'
+        )
+    
+    ax.set_xticks(init_states + list(range(min_states, max_states, state_interval)))
+    ax.set_xlabel('# states', fontsize=20)
+    ax.set_ylabel('acc (%)', fontsize=20)
+    ax.set_ylim(0, 105)
+    ax.grid(True, alpha=0.3)
+    
+    ax.legend(loc='best', fontsize=13)
+    
+    plt.tight_layout()
+    path = f'./{Config.model_name}' if not Config.reduce_states else f'./{Config.model_name}_reduced'
+    Config.BASE_PATH = os.path.relpath(path)
+    plt.savefig(os.path.join(Config.BASE_PATH, dfa_type, f"accuracy_{dfa_type}_lineplot.png"), dpi=300)
+    plt.close()
+
+    np.savez(os.path.join(Config.BASE_PATH, dfa_type, f'accuracy_{dfa_type}.npz'), array=accuracy_heatmap)
 
 def evaluate_random_sequence(model_name:str, num_samples:int, init_states:list, init_transitions:list, max_states:int, min_states:int, state_interval:int, max_transitions:int, min_transitions:int, transition_interval:int):
     #tracking correct and incorrect outputs
@@ -401,13 +620,14 @@ def evaluate_random_sequence(model_name:str, num_samples:int, init_states:list, 
     incorrect_output = {}
     #track 2D heatmap of accuracy
     accuracy_heatmap = np.zeros((len(init_states)+(max_states-min_states)//state_interval, len(init_transitions) + (max_transitions-min_transitions)//transition_interval))
+    eval_pipeline = EvaluationPipeline(model_name=model_name, sequence_generator=None)
 
     for i, state in tqdm(enumerate(init_states + list(range(min_states, max_states, state_interval)))):
         for j, trans in enumerate(init_transitions + list(range(min_transitions, max_transitions, transition_interval))):
             
             seq_generator = RandomLetterSequenceGenerator(length=trans, repeat_pattern_len=state)
-            eval_pipeline = EvaluationPipeline(model_name=model_name, sequence_generator=seq_generator)
-
+            eval_pipeline.update_sequence_generator(seq_generator)
+            
             acc, correct_per_sample, sequences, labels, __, __ = eval_pipeline.generate_and_classify_accuracy(num_samples=num_samples, seq_len=trans)
 
             for (correct,s,l) in zip(correct_per_sample, sequences, labels):
@@ -439,7 +659,7 @@ def evaluate_random_sequence(model_name:str, num_samples:int, init_states:list, 
     # Optional: label the rows and columns
     state_labels = init_states + [state for state in range(min_states, max_states, state_interval)]
     trans_labels = init_transitions + [trans for trans in range(min_transitions, max_transitions, transition_interval)]
-    df = pd.DataFrame(accuracy_heatmap, index=trans_labels, columns=state_labels)
+    df = pd.DataFrame(accuracy_heatmap, index=state_labels, columns=trans_labels).T
 
     # Plot and save heatmap
     plt.figure(figsize=(8, 8))

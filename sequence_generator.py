@@ -88,6 +88,8 @@ class DFAStateActionSequenceGenerator(SequenceGenerator):
         self.dfa = dfa if dfa is not None else self._create_dfa(num_states=num_states, num_edges=num_edges, num_unique_actions=num_unique_actions, max_sink_nodes=max_sink_nodes)
         assert start_state is None or start_state in self.dfa, "ERROR: start state is not in the DFA"
         self.start_state = start_state
+
+        self.p_explore = 0.2
    
     def generate(self, seq_len:int = None, start_state:str=None):
         self.dfa = self._create_dfa(num_states=self.num_states, num_edges=self.num_edges, num_unique_actions=self.num_unique_actions, max_sink_nodes=self.max_sink_nodes)
@@ -112,9 +114,11 @@ class DFAStateActionSequenceGenerator(SequenceGenerator):
             num_steps += 1
             
             if self.dfa[curr_state]:
+                
                 rand_action = random.choice(list(self.dfa[curr_state].keys()))
-                sequence.append(rand_action)
+
                 curr_state = self.dfa[curr_state][rand_action]
+                sequence.append(rand_action)
 
                 #restart from initial start state if curr_state is None
                 if not curr_state:
@@ -125,13 +129,13 @@ class DFAStateActionSequenceGenerator(SequenceGenerator):
         label = curr_state
 
         #formulate the prompt
-        sequence_prompt = f"States: {{{','.join(self.states)}}}\nActions:{{{','.join(self.actions)}}}\nSequence: Start at state {start_state}."
+        sequence_prompt = f"States: {{{','.join(self.states)}}}\nActions:{{{','.join(self.actions)}}}\nSequence: Start at state {start_state}. "
         for i in range(1, len(sequence)-1, 2):
-            sequence_prompt += f"Take action {sequence[i]}, go to state {sequence[i+1]}."
+            sequence_prompt += f"Take action {sequence[i]}, go to state {sequence[i+1]}. "
         
-        sequence_prompt += f"Take action {sequence[i-1]}, go to state"
+        sequence_prompt += f"Take action {sequence[-1]}, go to state"
 
-        return ' '.join(sequence) + ' ' if not self.reduce_states else ' '.join(sequence), label if not self.reduce_states else ' '+label
+        return sequence_prompt, label if not self.reduce_states else ' '+label
 
     def visualize_dfa(self):
         G = nx.DiGraph()
@@ -275,6 +279,7 @@ class DFAStateSequenceGenerator(SequenceGenerator):
         self.dfa = dfa if dfa is not None else self._create_dfa(num_states=num_states, num_edges=num_edges, max_sink_nodes=max_sink_nodes)
         assert start_state is None or start_state in self.dfa, "ERROR: start state is not in the DFA"
         self.start_state = start_state
+        self.p_explore = 0.2
     
     def generate_with_curr_dfa(self, seq_len:int = None, start_state:str=None):
         if start_state is not None:
@@ -330,14 +335,20 @@ class DFAStateSequenceGenerator(SequenceGenerator):
             num_steps += 1
             if self.dfa[curr_state]:
                 next_state = random.sample(self.dfa[curr_state],1)[0]
+
                 #restart from initial start state if curr_state is None
                 curr_state = next_state
                 
             else:
                 curr_state = start_state
 
+        sequence_prompt = f"States: {{{','.join(self.states)}}}\nSequence: Start at state {start_state}. "
+        for i in range(1, len(sequence)):
+            sequence_prompt += f"Go to state {sequence[i]}. "
         
-        return ' '.join(sequence) + ' ' if not self.reduce_states else ' '.join(sequence), label
+        sequence_prompt += f"Go to state"
+
+        return sequence_prompt, label
 
     def visualize_dfa(self):
         G = nx.DiGraph()
