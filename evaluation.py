@@ -168,8 +168,7 @@ class EvaluationPipeline:
     def normalize_patched_logit_diff(self, patched_logit_diff, corrupted_average_logit_diff, original_average_logit_diff) -> torch.Tensor: #a single item tensor (a number):
         # Subtract corrupted logit diff to measure the improvement, divide by the original - corrupted
         # 0 means zero change, negative means actively made worse, 1 means totally recovered clean performance, >1 means actively *improved* on clean performance
-
-        return (patched_logit_diff - corrupted_average_logit_diff).item()/(original_average_logit_diff - corrupted_average_logit_diff).item()
+        return (patched_logit_diff - corrupted_average_logit_diff).item()/(original_average_logit_diff - corrupted_average_logit_diff).item() if (original_average_logit_diff - corrupted_average_logit_diff).item() > Config.epsilon else 0.0
 
     def patch_residual_component(self, 
         corrupted_residual_component,
@@ -199,9 +198,10 @@ class EvaluationPipeline:
                     fwd_hooks = [(utils.get_act_name('resid_pre', layer), hook_fn)],
                     return_type='logits'
                 )
-                diff = ((patched_logits[0, -1, answer_tokens[0][0]]-patched_logits[0, -1, answer_tokens[0][1]]) + (patched_logits[1, -1, answer_tokens[1][0]]-patched_logits[1, -1, answer_tokens[1][1]]))/ 2    
+                diff = ((patched_logits[0, -1, answer_tokens[0][0]]-patched_logits[0, -1, answer_tokens[0][1]]) + (patched_logits[1, -1, answer_tokens[1][0]]-patched_logits[1, -1, answer_tokens[1][1]]))/ 2 
+                
                 patched_positions[layer, pos] = self.normalize_patched_logit_diff(patched_logit_diff=diff, corrupted_average_logit_diff=corrupted_average_logit_diff, original_average_logit_diff=original_average_logit_diff)
-        
+                
         prompt_position_labels = [t for t in self.model.to_str_tokens(regular_tokens[0])]
         
         # fig = px.imshow(patched_positions, labels={'x':'Position', 'y':"Layer"}, x=prompt_position_labels, title=f"Logit difference for patching {compressed_sequence}")
@@ -270,12 +270,16 @@ class EvaluationPipeline:
                 A1 = actions[0]
                 A2 = actions[1]
 
-                
-                multi_noop_buffer = [noop_buffer.format(A=random.sample(noop_action_set,1)[0], x1=start_state)]*(trans-2)
+                random_action = random.sample(noop_action_set,1)[0]
+                multi_noop_buffer = [noop_buffer.format(A=random_action, x1=start_state)]*(trans-2)
                 multi_noop_buffer = ' '.join(multi_noop_buffer)
 
+                random_action = random.sample(noop_action_set,1)[0]
+                counterfactual_multi_noop_buffer = [noop_buffer.format(A=random_action, x1=second_state)]*(trans-2)
+                counterfactual_multi_noop_buffer = ' '.join(counterfactual_multi_noop_buffer)
+
                 prompt = ' '.join([initial_transition.format(x1=start_state, A1=A1, A2=A2, x2=second_state), multi_noop_buffer, final_action.format(A1=A1)])
-                counterfactual_prompt = ' '.join([initial_transition.format(x1=second_state, A1=A2, A2=A1, x2=start_state), multi_noop_buffer, final_action.format(A1=A2)])
+                counterfactual_prompt = ' '.join([initial_transition.format(x1=second_state, A1=A2, A2=A1, x2=start_state), counterfactual_multi_noop_buffer, final_action.format(A1=A2)])
                 
                 tokens = self.model.to_tokens([prompt, counterfactual_prompt], prepend_bos=True).to("cuda")
                 logits, cache = self.model.run_with_cache(tokens, return_type="logits")
@@ -301,9 +305,8 @@ class EvaluationPipeline:
 
                     saved_samples -= 1
 
-
-                mean_accuracy.append(torch.argmax(logits[0,-1,:])==answer_tokens[0][0])
-                mean_accuracy.append(torch.argmax(logits[1,-1,:])==answer_tokens[1][0])
+                mean_accuracy.append((torch.argmax(logits[0,-1,:])==answer_tokens[0][0]).item())
+                mean_accuracy.append((torch.argmax(logits[1,-1,:])==answer_tokens[1][0]).item())
                 mean_logit_diff.append(logit_diff.item())
             
             mean_accuracies.append(np.mean(mean_accuracy))
@@ -313,7 +316,6 @@ class EvaluationPipeline:
         '''
         PLOT 4: Plot the mean logit diffs chart as number of transitions increase
         '''
-        pdb.set_trace()
         mean_logit_diffs = np.array(mean_logit_diffs)
         std_logit_diffs = np.array(std_logit_diffs)
         plt.plot(num_transitions, mean_logit_diffs, label='Mean Logit Diff')
@@ -330,6 +332,8 @@ class EvaluationPipeline:
         plt.title('Plot of Mean Logit Differences vs. Number of Transitions')
         # Save the figure
         plt.savefig(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'noop_logitdiff.png'))
+        plt.cla()
+        plt.clf()
 
         mean_accuracies = np.array(mean_accuracies)
         plt.plot(num_transitions, mean_accuracies, label='Mean Accuracy')
@@ -338,7 +342,8 @@ class EvaluationPipeline:
         plt.title('Plot of Mean Accuracy vs. Number of Transitions')
         # Save the figure
         plt.savefig(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'noop_accuracy.png'))
-
+        plt.cla()
+        plt.clf()
 
         return mean_logit_diffs
     
@@ -385,12 +390,14 @@ class EvaluationPipeline:
                     if (i//2) % 4 == 0:
                         #0, 8 -> 0, 4
                         prompt.append(target_loop.format(x1=x1, A1=A1, x3=x3, A2=A2))
+                        regular_label = (f" {x3}", f" {x4}")
                     if (i//2) % 4 == 1:
                         #2, 10 -> 1, 5
                         prompt.append(transition_to_distractor_loop.format(A3=A3, A1=A1, x3=x3, x2=x2))
                     if (i//2) % 4 == 2:
                         #4, 12 -> 2, 6
                         prompt.append(distractor_loop.format(x4=x4, A1=A1, x2=x2, A2=A2))
+                        regular_label = (f" {x4}", f" {x3}")
                     if (i//2) % 4 == 3:
                         #6, 14 -> 3, 7
                         prompt.append(transition_to_target_loop.format(A3=A3, A1=A1, x4=x4, x1=x1))
@@ -401,12 +408,12 @@ class EvaluationPipeline:
                 tokens = self.model.to_tokens([prompt, counterfactual_prompt], prepend_bos=True).to("cuda")
                 logits, cache = self.model.run_with_cache(tokens, return_type="logits")
 
-                answers = [(f" {x4}", f" {x3}"), (f" {x3}", f" {x4}")]
+                answers = [regular_label, (f" {x3}", f" {x4}")]
                 answer_tokens = []
                 for a in answers:
                     answer_tokens.append((self.model.to_single_token(a[0]), self.model.to_single_token(a[1]),))
                 logit_diff = ((logits[0, -1, answer_tokens[0][0]]-logits[0, -1, answer_tokens[0][1]]) + (logits[1, -1, answer_tokens[1][0]]-logits[1, -1, answer_tokens[1][1]]))/ 2    
-
+                
                 if random.random() >= 0.5 and saved_samples > 0:
                     corrupted_tokens = self.model.to_tokens([counterfactual_prompt, prompt], prepend_bos=True).to("cuda")
                     corrupted_logits, ___ = self.model.run_with_cache(corrupted_tokens, return_type="logits")
@@ -414,13 +421,16 @@ class EvaluationPipeline:
                     corrupted_logit_diff = ((corrupted_logits[0, -1, answer_tokens[0][0]]-corrupted_logits[0, -1, answer_tokens[0][1]]) + (corrupted_logits[1, -1, answer_tokens[1][0]]-corrupted_logits[1, -1, answer_tokens[1][1]]))/ 2    
 
                     compressed_sequence = ','.join(parse_states_and_actions(prompt=prompt))
-                    self.create_patching_heatmap(regular_tokens = tokens, compressed_sequence=compressed_sequence, cache=cache, corrupted_tokens=corrupted_tokens, answer_tokens=answer_tokens, corrupted_average_logit_diff=corrupted_logit_diff, original_average_logit_diff=logit_diff, filename=os.path.join(Config.BASE_PATH, 'dfa_stateaction', f'diffstate_sameaction_logitdiff_heatmap_{trans}trans.png'))
-
+                    try:
+                        self.create_patching_heatmap(regular_tokens = tokens, compressed_sequence=compressed_sequence, cache=cache, corrupted_tokens=corrupted_tokens, answer_tokens=answer_tokens, corrupted_average_logit_diff=corrupted_logit_diff, original_average_logit_diff=logit_diff, filename=os.path.join(Config.BASE_PATH, 'dfa_stateaction', f'diffstate_sameaction_logitdiff_heatmap_{trans}trans.png'))
+                    except Exception as e:
+                        print(f"ERROR: {e}")
+                        pdb.set_trace()
+        
 
                     saved_samples -= 1
-
-                mean_accuracy.append(torch.argmax(logits[0,-1,:])==answer_tokens[0][0])
-                mean_accuracy.append(torch.argmax(logits[1,-1,:])==answer_tokens[1][0])
+                mean_accuracy.append((torch.argmax(logits[0,-1,:])==answer_tokens[0][0]).item())
+                mean_accuracy.append((torch.argmax(logits[1,-1,:])==answer_tokens[1][0]).item())
                 mean_logit_diff.append(logit_diff.item())
             mean_accuracies.append(np.mean(mean_accuracy))
             mean_logit_diffs.append(np.mean(mean_logit_diff))
@@ -445,6 +455,8 @@ class EvaluationPipeline:
         plt.title('Plot of Mean Logit Differences vs. Number of Transitions')
         # Save the figure
         plt.savefig(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'diff_state_same_action_logitdiff.png'))
+        plt.cla()
+        plt.clf()
 
         mean_accuracies = np.array(mean_accuracies)
         plt.plot(num_transitions, mean_accuracies, label='Mean Accuracy')
@@ -453,6 +465,8 @@ class EvaluationPipeline:
         plt.title('Plot of Mean Accuracy vs. Number of Transitions')
         # Save the figure
         plt.savefig(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'diff_state_same_action_accuracy.png'))
+        plt.cla()
+        plt.clf()
 
         return mean_logit_diffs
 
@@ -469,9 +483,8 @@ def evaluate_dfa_stateaction_sequence(model_name:str, num_samples:int, init_stat
 
     eval_pipeline = EvaluationPipeline(model_name=model_name, sequence_generator=None)
 
-    pdb.set_trace()
-    eval_pipeline.evaluate_noop_dfa(num_transitions=Config.noop_transitions, num_trials=Config.noop_trials, num_saved_samples=1)
     eval_pipeline.evaluate_diff_state_same_action(num_transitions=Config.diff_state_same_action_transitions, num_trials=Config.diff_state_same_action_trials, num_saved_samples=1)
+    eval_pipeline.evaluate_noop_dfa(num_transitions=Config.noop_transitions, num_trials=Config.noop_trials, num_saved_samples=1)
     
     
 
@@ -644,6 +657,8 @@ def generate_all_accuracy_plots(accuracy_heatmap, init_transitions, min_transiti
         Config.BASE_PATH = os.path.relpath(path)
         plt.savefig(os.path.join(Config.BASE_PATH, dfa_type, f"accuracy_{dfa_type}_density_{density}.png"), dpi=300)
         plt.close()
+        plt.cla()
+        plt.clf()
 
     '''PLOT 2: Difference from random chance'''
     # Get the shape of the heatmap for diff from random
@@ -654,20 +669,25 @@ def generate_all_accuracy_plots(accuracy_heatmap, init_transitions, min_transiti
         fig, ax = plt.subplots(figsize=(8, 6))
         
         # Extract the 2D slice for the current density interval
-        accuracy_diff_slice = accuracy_heatmap[:, :, i] - np.array([1/(i+1) for i in range(len(accuracy_heatmap.shape[0]))])
+        states = init_states + list(range(min_states, max_states, state_interval))
+        accuracy_diff_slice = accuracy_heatmap[:, :, i] - np.expand_dims(np.array([1/s for s in states]), axis=1)
         accuracy_diff_slice = accuracy_diff_slice.T
+
+        # Normalize the accuracy values for color mapping
+        norm = Normalize(vmin=accuracy_diff_slice.min(), vmax=accuracy_diff_slice.max())
+        colors = viridis(norm(accuracy_diff_slice))
         
         # Plot the heatmap
         cax = ax.imshow(accuracy_diff_slice, cmap=viridis, norm=norm, origin='lower')
         
         # Add color bar
         cbar = fig.colorbar(cax, ax=ax, pad=0.1)
-        cbar.set_label('Accuracy Diff')
+        cbar.set_label('Accuracy')
         
         # Set labels and title
         ax.set_title(f"Density Interval {density}")
-        ax.set_xlabel("Number of Transitions")
-        ax.set_ylabel("Number of State")
+        ax.set_ylabel("Number of Transitions")
+        ax.set_xlabel("Number of State")
         
 
         # Annotate each cell with the accuracy value
@@ -676,21 +696,24 @@ def generate_all_accuracy_plots(accuracy_heatmap, init_transitions, min_transiti
                 ax.text(x, y, f"{accuracy_diff_slice[y, x]:.2f}", ha='center', va='center', color='black', fontsize=5)
         
         #update plot tick labels based on the range of states and transitions
-        ax.set_xticks(np.arange(len(init_transitions + list(range(min_transitions, max_transitions, transition_interval)))))
-        ax.set_xticklabels(init_transitions + list(range(min_transitions, max_transitions, transition_interval)))
-        ax.set_yticks(np.arange(len(init_states + list(range(min_states, max_states, state_interval)))))
-        ax.set_yticklabels(init_states + list(range(min_states, max_states, state_interval)))
+        ax.set_yticks(np.arange(len(init_transitions + list(range(min_transitions, max_transitions, transition_interval)))))
+        ax.set_yticklabels(init_transitions + list(range(min_transitions, max_transitions, transition_interval)))
+        ax.set_xticks(np.arange(len(init_states + list(range(min_states, max_states, state_interval)))))
+        ax.set_xticklabels(init_states + list(range(min_states, max_states, state_interval)))
         
         # Save the plot
         path = f'./{Config.model_name}' if not Config.reduce_states else f'./{Config.model_name}_reduced'
         Config.BASE_PATH = os.path.relpath(path)
         plt.savefig(os.path.join(Config.BASE_PATH, dfa_type, f"accuracy_{dfa_type}_density_{density}_diff.png"), dpi=300)
         plt.close()
+        plt.cla()
+        plt.clf()
+        
 
     np.savez(os.path.join(Config.BASE_PATH, dfa_type, f'accuracy_{dfa_type}.npz'), array=accuracy_heatmap)
     
     '''PLOT 3: Line graph vs random chance'''
-    accuracy_array = accuracy_array[:,:,1]*100
+    accuracy_heatmap = accuracy_heatmap[:,:,1]*100
 
     # Plot random baseline
     baseline = [100 / n for n in init_states + list(range(min_states, max_states, state_interval))]
@@ -706,7 +729,7 @@ def generate_all_accuracy_plots(accuracy_heatmap, init_transitions, min_transiti
             continue
         ax.plot(
             init_states + list(range(min_states, max_states, state_interval)), 
-            accuracy_array[:,i], 
+            accuracy_heatmap[:,i], 
             'o-', 
             color=colors[i], 
             label=f'{num_transitions} Transition{"s" if num_transitions > 1 else ""}'
