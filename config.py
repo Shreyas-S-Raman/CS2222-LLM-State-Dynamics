@@ -27,3 +27,10 @@ class Config:
 
     #range of samples
     num_samples = 50
+
+    #diff state same action transition evaluation
+    diff_state_same_action_transitions = [6, 10, 14, 18, 22, 26, 30]
+    diff_state_same_action_trials = 1
+
+    noop_transitions = [10, 20, 40, 50, 80, 100]
+    noop_trials = 1
