@@ -25,6 +25,7 @@ from functools import partial
 import plotly.io as pio
 import string
 import re
+import gc
 
 class EvaluationPipeline:
     def __init__(self, model_name:str, sequence_generator):
@@ -53,35 +54,38 @@ class EvaluationPipeline:
             sequences.append(sequence)
             label_tokens.append(label_token)
             
-            tokens = self.model.to_tokens(sequence, prepend_bos=True).to("cuda")
-            logits, _ = self.model.run_with_cache(tokens)
-            
-            pred_token_id = torch.argmax(logits[0,-1,:], dim=-1)
-            pred_token = self.model.to_string(pred_token_id)
-            pred_tokens.append(pred_token)
-            if 'dfa' in dir(self.seq_generator) and 'skip_actions' in dir(self.seq_generator):
-                label_token_id = self.model.to_tokens(label_token, prepend_bos=False)
-                label_token_id = torch.squeeze(label_token_id)
-                if pred_token_id.item() == label_token_id.item():
-                    correct += 1
-                    correct_per_sample.append(True)
+            with torch.no_grad():
+                tokens = self.model.to_tokens(sequence, prepend_bos=True).to("cuda")
+                logits, _ = self.model.run_with_cache(tokens)
+                
+                pred_token_id = torch.argmax(logits[0,-1,:], dim=-1)
+                pred_token = self.model.to_string(pred_token_id)
+                pred_tokens.append(pred_token)
+                if 'dfa' in dir(self.seq_generator) and 'skip_actions' in dir(self.seq_generator):
+                    label_token_id = self.model.to_tokens(label_token, prepend_bos=False)
+                    label_token_id = torch.squeeze(label_token_id)
+                    if pred_token_id.item() == label_token_id.item():
+                        correct += 1
+                        correct_per_sample.append(True)
+                    else:
+                        correct_per_sample.append(False)
                 else:
-                    correct_per_sample.append(False)
-            else:
-                # Convert true_label to a set of potential true labels
-                # Assuming label is a set of characters
-                label_token_ids = [torch.squeeze(self.model.to_tokens(char, prepend_bos=False)).item() for char in label_token]
+                    # Convert true_label to a set of potential true labels
+                    # Assuming label is a set of characters
+                    label_token_ids = [torch.squeeze(self.model.to_tokens(char, prepend_bos=False)).item() for char in label_token]
 
-                # Squeeze each token tensor and combine them into a single tensor
-                label_token_ids_set = set(label_token_ids)  # Assuming true_label is a tensor
+                    # Squeeze each token tensor and combine them into a single tensor
+                    label_token_ids_set = set(label_token_ids)  # Assuming true_label is a tensor
 
-                # Check if the predicted label is within the set of true labels
-                if pred_token_id.item() in label_token_ids_set:
-                    correct += 1
-                    correct_per_sample.append(True)
-                else:
-                    correct_per_sample.append(False)
-            
+                    # Check if the predicted label is within the set of true labels
+                    if pred_token_id.item() in label_token_ids_set:
+                        correct += 1
+                        correct_per_sample.append(True)
+                    else:
+                        correct_per_sample.append(False)
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+            gc.collect()
             
         if verbose:
             print('Sequence: ', sequence, 'Label:', label_token, 'Pred:', pred_token)
@@ -277,31 +281,35 @@ class EvaluationPipeline:
 
                 prompt = ' '.join([initial_transition.format(x1=start_state, A1=A1, A2=A2, x2=second_state), multi_noop_buffer, final_action.format(A1=A1)])
                 counterfactual_prompt = ' '.join([initial_transition.format(x1=second_state, A1=A2, A2=A1, x2=start_state), counterfactual_multi_noop_buffer, final_action.format(A1=A2)])
-                
-                tokens = self.model.to_tokens([prompt, counterfactual_prompt], prepend_bos=True).to("cuda")
-                logits, cache = self.model.run_with_cache(tokens, return_type="logits")
+                with torch.no_grad():
+                    tokens = self.model.to_tokens([prompt, counterfactual_prompt], prepend_bos=True).to("cuda")
+                    logits, cache = self.model.run_with_cache(tokens, return_type="logits")
 
 
-                answers = [(f" {second_state}", f" {start_state}"), (f" {start_state}", f" {second_state}")]
-                answer_tokens = []
-                for a in answers:
-                    answer_tokens.append((self.model.to_single_token(a[0]), self.model.to_single_token(a[1]),))
+                    answers = [(f" {second_state}", f" {start_state}"), (f" {start_state}", f" {second_state}")]
+                    answer_tokens = []
+                    for a in answers:
+                        answer_tokens.append((self.model.to_single_token(a[0]), self.model.to_single_token(a[1]),))
 
-                logit_diff = ((logits[0, -1, answer_tokens[0][0]]-logits[0, -1, answer_tokens[0][1]]) + (logits[1, -1, answer_tokens[1][0]]-logits[1, -1, answer_tokens[1][1]]))/ 2    
-                
-                if random.random() >= 0.5 and saved_samples > 0:
-                    corrupted_tokens = self.model.to_tokens([counterfactual_prompt, prompt], prepend_bos=True).to("cuda")
-                    corrupted_logits, __ = self.model.run_with_cache(corrupted_tokens, return_type="logits")
+                    logit_diff = ((logits[0, -1, answer_tokens[0][0]]-logits[0, -1, answer_tokens[0][1]]) + (logits[1, -1, answer_tokens[1][0]]-logits[1, -1, answer_tokens[1][1]]))/ 2    
+                    
+                    if random.random() >= 0.5 and saved_samples > 0:
+                        corrupted_tokens = self.model.to_tokens([counterfactual_prompt, prompt], prepend_bos=True).to("cuda")
+                        corrupted_logits, __ = self.model.run_with_cache(corrupted_tokens, return_type="logits")
 
-                    corrupted_logit_diff = ((corrupted_logits[0, -1, answer_tokens[0][0]]-corrupted_logits[0, -1, answer_tokens[0][1]]) + (corrupted_logits[1, -1, answer_tokens[1][0]]-corrupted_logits[1, -1, answer_tokens[1][1]]))/ 2    
+                        corrupted_logit_diff = ((corrupted_logits[0, -1, answer_tokens[0][0]]-corrupted_logits[0, -1, answer_tokens[0][1]]) + (corrupted_logits[1, -1, answer_tokens[1][0]]-corrupted_logits[1, -1, answer_tokens[1][1]]))/ 2    
 
-                    compressed_sequence = ','.join(parse_states_and_actions(prompt=prompt))
+                        compressed_sequence = ','.join(parse_states_and_actions(prompt=prompt))
 
-                    self.create_patching_heatmap(regular_tokens=tokens, compressed_sequence=compressed_sequence, cache=cache, corrupted_tokens=corrupted_tokens, answer_tokens=answer_tokens, corrupted_average_logit_diff=corrupted_logit_diff, original_average_logit_diff=logit_diff, filename=os.path.join(Config.BASE_PATH, 'dfa_stateaction', f'noop_logitdiff_heatmap_{trans}trans.png'))
+                        self.create_patching_heatmap(regular_tokens=tokens, compressed_sequence=compressed_sequence, cache=cache, corrupted_tokens=corrupted_tokens, answer_tokens=answer_tokens, corrupted_average_logit_diff=corrupted_logit_diff, original_average_logit_diff=logit_diff, filename=os.path.join(Config.BASE_PATH, 'dfa_stateaction', f'noop_logitdiff_heatmap_{trans}trans.png'))
 
 
-                    saved_samples -= 1
-
+                        saved_samples -= 1
+                    del cache
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
+                gc.collect()
+                self.model.reset_hooks()
                 mean_accuracy.append((torch.argmax(logits[0,-1,:])==answer_tokens[0][0]).item())
                 mean_accuracy.append((torch.argmax(logits[1,-1,:])==answer_tokens[1][0]).item())
                 mean_logit_diff.append(logit_diff.item())
@@ -401,38 +409,43 @@ class EvaluationPipeline:
 
                 prompt = ' '.join(prompt + [final_action.format(A1=A1)])
                 counterfactual_prompt = ' '.join(counterfactual_prompt + [final_action.format(A1=A1)])
+                with torch.no_grad():
+                    tokens = self.model.to_tokens([prompt, counterfactual_prompt], prepend_bos=True).to("cuda")
+                    logits, cache = self.model.run_with_cache(tokens, return_type="logits")
 
-                tokens = self.model.to_tokens([prompt, counterfactual_prompt], prepend_bos=True).to("cuda")
-                logits, cache = self.model.run_with_cache(tokens, return_type="logits")
+                    answers = [regular_label, (f" {x3}", f" {x4}")]
+                    answer_tokens = []
+                    for a in answers:
+                        answer_tokens.append((self.model.to_single_token(a[0]), self.model.to_single_token(a[1]),))
+                    logit_diff = ((logits[0, -1, answer_tokens[0][0]]-logits[0, -1, answer_tokens[0][1]]) + (logits[1, -1, answer_tokens[1][0]]-logits[1, -1, answer_tokens[1][1]]))/ 2    
+                    
+                    if random.random() >= 0.5 and saved_samples > 0:
+                        corrupted_tokens = self.model.to_tokens([counterfactual_prompt, prompt], prepend_bos=True).to("cuda")
+                        corrupted_logits, ___ = self.model.run_with_cache(corrupted_tokens, return_type="logits")
 
-                answers = [regular_label, (f" {x3}", f" {x4}")]
-                answer_tokens = []
-                for a in answers:
-                    answer_tokens.append((self.model.to_single_token(a[0]), self.model.to_single_token(a[1]),))
-                logit_diff = ((logits[0, -1, answer_tokens[0][0]]-logits[0, -1, answer_tokens[0][1]]) + (logits[1, -1, answer_tokens[1][0]]-logits[1, -1, answer_tokens[1][1]]))/ 2    
-                
-                if random.random() >= 0.5 and saved_samples > 0:
-                    corrupted_tokens = self.model.to_tokens([counterfactual_prompt, prompt], prepend_bos=True).to("cuda")
-                    corrupted_logits, ___ = self.model.run_with_cache(corrupted_tokens, return_type="logits")
+                        corrupted_logit_diff = ((corrupted_logits[0, -1, answer_tokens[0][0]]-corrupted_logits[0, -1, answer_tokens[0][1]]) + (corrupted_logits[1, -1, answer_tokens[1][0]]-corrupted_logits[1, -1, answer_tokens[1][1]]))/ 2    
 
-                    corrupted_logit_diff = ((corrupted_logits[0, -1, answer_tokens[0][0]]-corrupted_logits[0, -1, answer_tokens[0][1]]) + (corrupted_logits[1, -1, answer_tokens[1][0]]-corrupted_logits[1, -1, answer_tokens[1][1]]))/ 2    
+                        compressed_sequence = ','.join(parse_states_and_actions(prompt=prompt))
+                        try:
+                            self.create_patching_heatmap(regular_tokens = tokens, compressed_sequence=compressed_sequence, cache=cache, corrupted_tokens=corrupted_tokens, answer_tokens=answer_tokens, corrupted_average_logit_diff=corrupted_logit_diff, original_average_logit_diff=logit_diff, filename=os.path.join(Config.BASE_PATH, 'dfa_stateaction', f'diffstate_sameaction_logitdiff_heatmap_{trans}trans.png'))
+                        except Exception as e:
+                            print(f"ERROR: {e}")
+                            pdb.set_trace()
+            
 
-                    compressed_sequence = ','.join(parse_states_and_actions(prompt=prompt))
-                    try:
-                        self.create_patching_heatmap(regular_tokens = tokens, compressed_sequence=compressed_sequence, cache=cache, corrupted_tokens=corrupted_tokens, answer_tokens=answer_tokens, corrupted_average_logit_diff=corrupted_logit_diff, original_average_logit_diff=logit_diff, filename=os.path.join(Config.BASE_PATH, 'dfa_stateaction', f'diffstate_sameaction_logitdiff_heatmap_{trans}trans.png'))
-                    except Exception as e:
-                        print(f"ERROR: {e}")
-                        pdb.set_trace()
-        
-
-                    saved_samples -= 1
+                        saved_samples -= 1
+                    del cache
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
+                gc.collect()
+                self.model.reset_hooks()
                 mean_accuracy.append((torch.argmax(logits[0,-1,:])==answer_tokens[0][0]).item())
                 mean_accuracy.append((torch.argmax(logits[1,-1,:])==answer_tokens[1][0]).item())
                 mean_logit_diff.append(logit_diff.item())
             mean_accuracies.append(np.mean(mean_accuracy))
             mean_logit_diffs.append(np.mean(mean_logit_diff))
             std_logit_diffs.append(np.std(mean_logit_diff))
-        
+
         '''
         PLOT 4: Plot the mean logit diffs chart as number of transitions increase
         '''
@@ -482,7 +495,6 @@ def evaluate_dfa_stateaction_sequence(model_name:str, num_samples:int, init_stat
 
     eval_pipeline.evaluate_diff_state_same_action(num_transitions=Config.diff_state_same_action_transitions, num_trials=Config.diff_state_same_action_trials, num_saved_samples=1)
     eval_pipeline.evaluate_noop_dfa(num_transitions=Config.noop_transitions, num_trials=Config.noop_trials, num_saved_samples=1)
-    
     
 
     for i, state in tqdm(enumerate(init_states + list(range(min_states, max_states, state_interval)))):

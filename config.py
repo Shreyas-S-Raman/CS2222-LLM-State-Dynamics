@@ -8,7 +8,7 @@ os.environ["HF_TOKEN"] = hf_key
 class Config:
     #base arguments overriden in evaluate_model.py
     reduce_states = True
-    model_name = 'pythia-1b'
+    model_name = 'gpt2-large'
     BASE_PATH = None
 
     #num states range
