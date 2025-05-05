@@ -233,7 +233,7 @@ class EvaluationPipeline:
         plt.yticks(
             ticks=range(patched_positions.shape[0]),
             labels=[str(i) for i in range(patched_positions.shape[0])],
-            fontsize=8
+            fontsize=4
         )
 
         cbar = plt.colorbar(im, ticks=np.linspace(0, 1, 21))
