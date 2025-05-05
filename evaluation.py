@@ -56,12 +56,9 @@ class EvaluationPipeline:
             tokens = self.model.to_tokens(sequence, prepend_bos=True).to("cuda")
             logits, _ = self.model.run_with_cache(tokens)
             
-            # probs = torch.nn.functional.softmax(logits, dim=-1)[0, -1, :]
             pred_token_id = torch.argmax(logits[0,-1,:], dim=-1)
             pred_token = self.model.to_string(pred_token_id)
             pred_tokens.append(pred_token)
-            
-
             if 'dfa' in dir(self.seq_generator) and 'skip_actions' in dir(self.seq_generator):
                 label_token_id = self.model.to_tokens(label_token, prepend_bos=False)
                 label_token_id = torch.squeeze(label_token_id)
@@ -473,7 +470,7 @@ class EvaluationPipeline:
 
 
 def evaluate_dfa_stateaction_sequence(model_name:str, num_samples:int, init_states:list, init_transitions:list, max_states:int, min_states:int, state_interval:int, max_transitions:int, min_transitions:int, transition_interval:int, density_interval:int, reduce_states: bool=False):
-    
+    os.makedirs(os.path.join(Config.BASE_PATH, 'dfa_stateaction'), exist_ok=True)
     #tracking correct and incorrect outputs
     correct_output = {}
     incorrect_output = {}
@@ -612,7 +609,6 @@ def evaluate_dfa_statestate_sequence(model_name:str, num_samples:int, init_state
    
 
 def generate_all_accuracy_plots(accuracy_heatmap, init_transitions, min_transitions, max_transitions, transition_interval, init_states, min_states, max_states, state_interval, dfa_type):
-    os.makedirs(os.path.join(Config.BASE_PATH, dfa_type), exist_ok=True)
     '''PLOT 1: General Accuracy'''
     # Get the shape of the heatmap
     num_states, num_transitions, density_intervals = accuracy_heatmap.shape
