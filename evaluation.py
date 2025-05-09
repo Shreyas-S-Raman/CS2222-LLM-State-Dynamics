@@ -182,8 +182,18 @@ class EvaluationPipeline:
         corrupted_residual_component[:, pos_index,:] = clean_cache[hook.name][:, pos_index,:]
         return corrupted_residual_component
 
+    def patch_head_vector_at_pos(self,
+        corrupted_head_vector,
+        hook,
+        head_index: int, #The attention head index
+        pos_index: int,
+        clean_cache: ActivationCache) -> torch.Tensor:
+        
+        corrupted_head_vector[:,pos_index, head_index, :] = clean_cache[hook.name][:, pos_index, head_index, :]
+        return corrupted_head_vector
 
-    def create_patching_heatmap(self, regular_tokens, compressed_sequence, cache: ActivationCache, corrupted_tokens, answer_tokens, corrupted_average_logit_diff: float, original_average_logit_diff: float, filename: str):
+
+    def create_token_patching_heatmap(self, regular_tokens, compressed_sequence, cache: ActivationCache, corrupted_tokens, answer_tokens, corrupted_average_logit_diff: float, original_average_logit_diff: float, filename: str):
         n_tokens = len(regular_tokens[0])
 
         n_layers = self.model.cfg.n_layers
@@ -242,16 +252,77 @@ class EvaluationPipeline:
         plt.tight_layout()
         plt.savefig(filename, dpi=300)
         plt.close()
+    
+
+    def create_head_patching_heatmap(self, patched_heads_average, num_samples, regular_tokens, compressed_sequence, cache: ActivationCache, corrupted_tokens, answer_tokens, corrupted_average_logit_diff: float, original_average_logit_diff: float, filename: str):
+        
+        n_heads = self.model.cfg.n_heads
+        n_layers = self.model.cfg.n_layers
+        patched_heads = np.zeros((n_layers, n_heads))
+
+        for layer in tqdm(list(range(n_layers))):
+            for head in range(n_heads):
+                #TODO populate patched_heads
+                hook_fn = partial(self.patch_head_vector_at_pos, head_index = head, pos_index=-1, clean_cache = cache)
+                patched_logits = self.model.run_with_hooks(
+                    corrupted_tokens,
+                    fwd_hooks = [(utils.get_act_name('z' , layer), hook_fn)],
+                    return_type='logits'
+                )
+
+                diff = ((patched_logits[0, -1, answer_tokens[0][0]]-patched_logits[0, -1, answer_tokens[0][1]]) + (patched_logits[1, -1, answer_tokens[1][0]]-patched_logits[1, -1, answer_tokens[1][1]]))/ 2 
+                patched_heads[layer, head] = self.normalize_patched_logit_diff(patched_logit_diff=diff, corrupted_average_logit_diff=corrupted_average_logit_diff, original_average_logit_diff=original_average_logit_diff)
+        
+        
+        patched_heads_average += patched_heads
+
+        plt.figure(figsize=(10, 5))  # Adjust width as needed
+        im = plt.imshow(
+            patched_heads_average,
+            aspect='auto',
+            cmap='plasma',
+            vmin=0,
+            vmax=1
+        )
+
+        plt.title(f"Logit difference for patching heads/layers")
+        plt.xlabel("Head")
+        plt.ylabel("Layer")
+
+        plt.xticks(
+            ticks=range(n_heads),
+            labels=range(n_heads),
+            rotation=70,
+            fontsize=4
+        )
+        plt.yticks(
+            ticks=range(patched_heads.shape[0]),
+            labels=[str(i) for i in range(patched_heads.shape[0])],
+            fontsize=4
+        )
+
+        cbar = plt.colorbar(im, ticks=np.linspace(0, 1, 21))
+        cbar.set_label('Logit Diff', fontsize=6)
+        cbar.ax.tick_params(labelsize=6)
+        plt.tight_layout()
+        plt.savefig(filename, dpi=300)
+        plt.close()
+
+        return patched_heads_average
 
     def evaluate_noop_dfa(self, num_transitions: list[int], num_trials: int, num_saved_samples: int):
         #NOTE: large number of transitions e.g. 10, 20, 40, 50, 80, 100
-        initial_transition = "Start at state {x1}. Take action {A1}, go to state {x2}. Take action {A2}, go to state {x1}."
-        noop_buffer = "Take action {A}, go to state {x1}."
-        final_action = "Take action {A1}, go to state" 
+        initial_transition = "Start at state {x1}. Take action {A1}, go to state {x2}. Take action {A2}, go to state {x1}. Take action {A1}, go to state {x2}."
+        noop_buffer = "Take action {A}, go to state {x}."
+        final_action = "Take action {A2}, go to state" 
 
         mean_logit_diffs = []
         std_logit_diffs = []
         mean_accuracies = []
+
+        n_heads = self.model.cfg.n_heads
+        n_layers = self.model.cfg.n_layers
+        patched_heads_average = np.zeros((n_layers, n_heads))
 
         for trans in num_transitions:
             mean_logit_diff = []
@@ -260,33 +331,30 @@ class EvaluationPipeline:
             for _ in range(num_trials):
                 
                 # Populate the set of actions and states used to make the DFA
-                states = random.sample(string.ascii_lowercase, 2)
+                states = random.sample(string.ascii_lowercase, 3)
                 actions = random.sample(string.ascii_uppercase, 2)
                 noop_action_set = set(string.ascii_uppercase) - set(actions)
                 
                 #set all variables initially
-                start_state = states[0]
-                second_state = states[1]
+                clean_state = states[0]
+                counterfact_state = states[1]
+                noop_state = states[2]
                 
-                A1 = actions[0]
-                A2 = actions[1]
+                transition_to_noop = actions[0]
+                transition_to_org = actions[1]
 
                 random_action = random.sample(noop_action_set,1)[0]
-                multi_noop_buffer = [noop_buffer.format(A=random_action, x1=start_state)]*(trans-2)
+                multi_noop_buffer = [noop_buffer.format(A=random_action, x=noop_state)]*(trans-3)
                 multi_noop_buffer = ' '.join(multi_noop_buffer)
 
-                random_action = random.sample(noop_action_set,1)[0]
-                counterfactual_multi_noop_buffer = [noop_buffer.format(A=random_action, x1=second_state)]*(trans-2)
-                counterfactual_multi_noop_buffer = ' '.join(counterfactual_multi_noop_buffer)
-
-                prompt = ' '.join([initial_transition.format(x1=start_state, A1=A1, A2=A2, x2=second_state), multi_noop_buffer, final_action.format(A1=A1)])
-                counterfactual_prompt = ' '.join([initial_transition.format(x1=second_state, A1=A2, A2=A1, x2=start_state), counterfactual_multi_noop_buffer, final_action.format(A1=A2)])
+                prompt = ' '.join([initial_transition.format(x1=clean_state, A1=transition_to_noop, x2=noop_state, A2=transition_to_org), multi_noop_buffer, final_action.format(A2 = transition_to_org)])
+                counterfactual_prompt = ' '.join([initial_transition.format(x1=counterfact_state, A1=transition_to_noop, x2=noop_state, A2=transition_to_org), multi_noop_buffer, final_action.format(A2=transition_to_org)])
                 with torch.no_grad():
                     tokens = self.model.to_tokens([prompt, counterfactual_prompt], prepend_bos=True).to("cuda")
                     logits, cache = self.model.run_with_cache(tokens, return_type="logits")
 
 
-                    answers = [(f" {second_state}", f" {start_state}"), (f" {start_state}", f" {second_state}")]
+                    answers = [(f" {clean_state}", f" {counterfact_state}"), (f" {counterfact_state}", f" {clean_state}")]
                     answer_tokens = []
                     for a in answers:
                         answer_tokens.append((self.model.to_single_token(a[0]), self.model.to_single_token(a[1]),))
@@ -301,8 +369,9 @@ class EvaluationPipeline:
 
                         compressed_sequence = ','.join(parse_states_and_actions(prompt=prompt))
 
-                        self.create_patching_heatmap(regular_tokens=tokens, compressed_sequence=compressed_sequence, cache=cache, corrupted_tokens=corrupted_tokens, answer_tokens=answer_tokens, corrupted_average_logit_diff=corrupted_logit_diff, original_average_logit_diff=logit_diff, filename=os.path.join(Config.BASE_PATH, 'dfa_stateaction', f'noop_logitdiff_heatmap_{trans}trans.png'))
-
+                        self.create_token_patching_heatmap(regular_tokens=tokens, compressed_sequence=compressed_sequence, cache=cache, corrupted_tokens=corrupted_tokens, answer_tokens=answer_tokens, corrupted_average_logit_diff=corrupted_logit_diff, original_average_logit_diff=logit_diff, filename=os.path.join(Config.BASE_PATH, 'dfa_stateaction', f'noop_logitdiff_token_heatmap_{trans}trans.png'))
+                        patched_heads_average = self.create_head_patching_heatmap(patched_heads_average=patched_heads_average, num_samples=len(num_transitions), regular_tokens=tokens, compressed_sequence=compressed_sequence, cache=cache, corrupted_tokens=corrupted_tokens, answer_tokens=answer_tokens, corrupted_average_logit_diff=corrupted_logit_diff, original_average_logit_diff=logit_diff, filename=os.path.join(Config.BASE_PATH, 'dfa_stateaction', f'noop_logitdiff_head_heatmap.png'))
+                        
 
                         saved_samples -= 1
                     del cache
@@ -368,6 +437,10 @@ class EvaluationPipeline:
         mean_logit_diffs = []
         std_logit_diffs = []
 
+        n_heads = self.model.cfg.n_heads
+        n_layers = self.model.cfg.n_layers
+        patched_heads_average = np.zeros((n_layers, n_heads))
+
         for trans in num_transitions:
             mean_logit_diff = []
             mean_accuracy = []
@@ -390,22 +463,25 @@ class EvaluationPipeline:
                 prompt = [init_state.format(x1=x1)]
                 counterfactual_prompt = [init_state.format(x1=x1)]
                 for i in range(0, trans, 2):
-                    counterfactual_prompt.append(target_loop.format(x1=x1, A1=A1, x3=x3, A2=A2))
                     
                     if (i//2) % 4 == 0:
                         #0, 8 -> 0, 4
                         prompt.append(target_loop.format(x1=x1, A1=A1, x3=x3, A2=A2))
+                        counterfactual_prompt.append(target_loop.format(x1=x1, A1=A1, x3=x3, A2=A2))
                         regular_label = (f" {x3}", f" {x4}")
                     if (i//2) % 4 == 1:
                         #2, 10 -> 1, 5
                         prompt.append(transition_to_distractor_loop.format(A3=A3, A1=A1, x3=x3, x2=x2))
+                        counterfactual_prompt.append(transition_to_distractor_loop.format(A3=A3, A1=A1, x3=x3, x2=x1))
                     if (i//2) % 4 == 2:
                         #4, 12 -> 2, 6
                         prompt.append(distractor_loop.format(x4=x4, A1=A1, x2=x2, A2=A2))
+                        counterfactual_prompt.append(distractor_loop.format(x4=x3, A1=A1, x2=x1, A2=A2))
                         regular_label = (f" {x4}", f" {x3}")
                     if (i//2) % 4 == 3:
                         #6, 14 -> 3, 7
                         prompt.append(transition_to_target_loop.format(A3=A3, A1=A1, x4=x4, x1=x1))
+                        counterfactual_prompt.append(transition_to_target_loop.format(A3=A3, A1=A1, x4=x3, x1=x1))
 
                 prompt = ' '.join(prompt + [final_action.format(A1=A1)])
                 counterfactual_prompt = ' '.join(counterfactual_prompt + [final_action.format(A1=A1)])
@@ -427,7 +503,9 @@ class EvaluationPipeline:
 
                         compressed_sequence = ','.join(parse_states_and_actions(prompt=prompt))
                         try:
-                            self.create_patching_heatmap(regular_tokens = tokens, compressed_sequence=compressed_sequence, cache=cache, corrupted_tokens=corrupted_tokens, answer_tokens=answer_tokens, corrupted_average_logit_diff=corrupted_logit_diff, original_average_logit_diff=logit_diff, filename=os.path.join(Config.BASE_PATH, 'dfa_stateaction', f'diffstate_sameaction_logitdiff_heatmap_{trans}trans.png'))
+                            self.create_token_patching_heatmap(regular_tokens = tokens, compressed_sequence=compressed_sequence, cache=cache, corrupted_tokens=corrupted_tokens, answer_tokens=answer_tokens, corrupted_average_logit_diff=corrupted_logit_diff, original_average_logit_diff=logit_diff, filename=os.path.join(Config.BASE_PATH, 'dfa_stateaction', f'diffstate_sameaction_logitdiff_token_heatmap_{trans}trans.png'))
+                            patched_heads_average = self.create_head_patching_heatmap(patched_heads_average=patched_heads_average, num_samples=len(num_transitions), regular_tokens=tokens, compressed_sequence=compressed_sequence, cache=cache, corrupted_tokens=corrupted_tokens, answer_tokens=answer_tokens, corrupted_average_logit_diff=corrupted_logit_diff, original_average_logit_diff=logit_diff, filename=os.path.join(Config.BASE_PATH, 'dfa_stateaction', f'diffstate_sameaction_logitdiff_head_heatmap.png'))
+                        
                         except Exception as e:
                             print(f"ERROR: {e}")
                             pdb.set_trace()
@@ -440,7 +518,7 @@ class EvaluationPipeline:
                 gc.collect()
                 self.model.reset_hooks()
                 mean_accuracy.append((torch.argmax(logits[0,-1,:])==answer_tokens[0][0]).item())
-                mean_accuracy.append((torch.argmax(logits[1,-1,:])==answer_tokens[1][0]).item())
+                # mean_accuracy.append((torch.argmax(logits[1,-1,:])==answer_tokens[1][0]).item())
                 mean_logit_diff.append(logit_diff.item())
             mean_accuracies.append(np.mean(mean_accuracy))
             mean_logit_diffs.append(np.mean(mean_logit_diff))
@@ -493,16 +571,17 @@ def evaluate_dfa_stateaction_sequence(model_name:str, num_samples:int, init_stat
 
     eval_pipeline = EvaluationPipeline(model_name=model_name, sequence_generator=None)
 
-    eval_pipeline.evaluate_diff_state_same_action(num_transitions=Config.diff_state_same_action_transitions, num_trials=Config.diff_state_same_action_trials, num_saved_samples=1)
+    # eval_pipeline.evaluate_diff_state_same_action(num_transitions=Config.diff_state_same_action_transitions, num_trials=Config.diff_state_same_action_trials, num_saved_samples=1)
     eval_pipeline.evaluate_noop_dfa(num_transitions=Config.noop_transitions, num_trials=Config.noop_trials, num_saved_samples=1)
     
-
+    exit()
     for i, state in tqdm(enumerate(init_states + list(range(min_states, max_states, state_interval)))):
         for j, trans in enumerate(init_transitions + list(range(min_transitions, max_transitions, transition_interval))):
                 
             max_density = max(1, state*(state-1)//2 + 1)
+            #[state, int((state+max_density)//2), max_density]
             
-            for k, density in enumerate([state, int((state+max_density)//2), max_density]):
+            for k, density in enumerate([int((state+max_density)//2)]):
                 if state not in correct_output:
                     correct_output[state] = {}
                 if trans not in correct_output[state]:
