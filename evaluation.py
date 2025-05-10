@@ -27,6 +27,72 @@ import string
 import re
 import gc
 
+# Memory tracking helper functions
+def log_gpu_memory(label="", show_tensors=False, reset_max=False):
+    """
+    Log GPU memory usage at specific points in the code
+    
+    Args:
+        label: Label to identify this tracking point
+        show_tensors: Whether to show details about largest tensors
+        reset_max: Whether to reset the peak memory counter
+    """
+    if not torch.cuda.is_available():
+        return
+        
+    current = torch.cuda.memory_allocated() / (1024**3)
+    peak = torch.cuda.max_memory_allocated() / (1024**3)
+    reserved = torch.cuda.memory_reserved() / (1024**3)
+    
+    print(f"GPU MEMORY [{label}]: Current: {current:.2f}GB | Peak: {peak:.2f}GB | Reserved: {reserved:.2f}GB")
+    
+    if show_tensors:
+        # Find largest tensors
+        objs = []
+        for obj in gc.get_objects():
+            try:
+                if torch.is_tensor(obj) and obj.device.type == 'cuda' and not obj.is_sparse:
+                    objs.append((obj.element_size() * obj.nelement(), obj.shape, obj.dtype, obj))
+            except:
+                pass
+        
+        # Sort by size, largest first
+        objs.sort(key=lambda x: x[0], reverse=True)
+        
+        print("\nLargest tensors on GPU:")
+        for i, (size, shape, dtype, _) in enumerate(objs[:5]):  # Show top 5
+            print(f"{i+1}. Size: {size/1024**2:.2f}MB | Shape: {shape} | Type: {dtype}")
+            
+    if reset_max:
+        torch.cuda.reset_max_memory_allocated()
+
+def check_for_memory_leaks():
+    """Find and log details about tensors currently on GPU to help identify memory leaks."""
+    total_size = 0
+    tensor_list = []
+    
+    # Find all tensors currently allocated
+    for obj in gc.get_objects():
+        try:
+            if torch.is_tensor(obj) and obj.device.type == 'cuda':
+                tensor_size = obj.element_size() * obj.nelement() / (1024 * 1024)  # Size in MB
+                tensor_list.append((obj.shape, obj.dtype, tensor_size))
+                total_size += tensor_size
+        except:
+            continue
+    
+    # Sort by size (largest first)
+    tensor_list.sort(key=lambda x: x[2], reverse=True)
+    
+    # Print info about the largest tensors
+    print(f"Found {len(tensor_list)} tensors on GPU with total size of {total_size:.2f}MB")
+    if tensor_list:
+        print("\nLargest tensors on GPU:")
+        for i, (shape, dtype, size) in enumerate(tensor_list[:5]):
+            print(f"{i+1}. Size: {size:.2f}MB | Shape: {shape} | Type: {dtype}")
+            
+    return tensor_list
+
 class EvaluationPipeline:
     def __init__(self, model_name:str, sequence_generator):
         self.model = HookedTransformer.from_pretrained(
@@ -191,9 +257,22 @@ class EvaluationPipeline:
         #Populate a heatmap of patched logit differences
         patched_positions = np.zeros((n_layers, n_tokens))
 
+        # Track memory before patching loop
+        log_gpu_memory("Before patching loop in heatmap")
+
         for layer in track(list(range(n_layers))):
+            # Check memory usage periodically during patches
+            if layer % 8 == 0:
+                log_gpu_memory(f"Patching layer {layer}")
+                torch.cuda.empty_cache()
+
             for pos in range(n_tokens):
                 hook_fn = partial(self.patch_residual_component, pos_index = pos, clean_cache = cache)
+                
+                # Make sure to clear any accumulated intermediate tensors
+                if pos % 10 == 0:
+                    torch.cuda.empty_cache()
+                    
                 patched_logits = self.model.run_with_hooks(
                     corrupted_tokens,
                     fwd_hooks = [(utils.get_act_name('resid_pre', layer), hook_fn)],
@@ -203,13 +282,13 @@ class EvaluationPipeline:
                 
                 patched_positions[layer, pos] = self.normalize_patched_logit_diff(patched_logit_diff=diff, corrupted_average_logit_diff=corrupted_average_logit_diff, original_average_logit_diff=original_average_logit_diff)
                 
+                # Delete patched_logits to free memory immediately
+                del patched_logits, diff
+                
         prompt_position_labels = [t for t in self.model.to_str_tokens(regular_tokens[0])]
         
-        # fig = px.imshow(patched_positions, labels={'x':'Position', 'y':"Layer"}, x=prompt_position_labels, title=f"Logit difference for patching {compressed_sequence}")
-        # # Update layout for smaller, tilted axis labels
-        # fig.update_xaxes(tickangle=45, tickfont=dict(size=6))
-        # fig.update_yaxes(tickfont=dict(size=8))
-        # fig.write_image(filename)
+        # Track memory after patching loop
+        log_gpu_memory("After patching loop in heatmap")
 
         plt.figure(figsize=(max(10, len(prompt_position_labels) * 0.2), 3))  # Adjust width as needed
         im = plt.imshow(
@@ -242,6 +321,15 @@ class EvaluationPipeline:
         plt.tight_layout()
         plt.savefig(filename, dpi=300)
         plt.close()
+        
+        # Clean up matplotlib resources
+        plt.cla()
+        plt.clf()
+        del patched_positions
+        torch.cuda.empty_cache()
+        
+        # Final memory check after heatmap
+        log_gpu_memory("After heatmap cleanup")
 
     def evaluate_noop_dfa(self, num_transitions: list[int], num_trials: int, num_saved_samples: int):
         #NOTE: large number of transitions e.g. 10, 20, 40, 50, 80, 100
@@ -249,15 +337,44 @@ class EvaluationPipeline:
         noop_buffer = "Take action {A}, go to state {x1}."
         final_action = "Take action {A1}, go to state" 
 
+        # Initialize these variables at function level to avoid UnboundLocalError
+        cache1 = None
+        logits1 = None
+        logits2 = None
+        corrupted_logits1 = None
+        corrupted_logits2 = None
+        cpu_cache = None
+
         mean_logit_diffs = []
         std_logit_diffs = []
         mean_accuracies = []
 
+        # Initial memory state
+        log_gpu_memory("Start of evaluate_noop_dfa", reset_max=True)
+
         for trans in num_transitions:
+            print(f"Processing transition length: {trans}")
             mean_logit_diff = []
             saved_samples = num_saved_samples
             mean_accuracy = []
-            for _ in range(num_trials):
+            for trial in range(num_trials):
+                # Reset these variables for each trial
+                cache1 = None
+                logits1 = None
+                logits2 = None
+                corrupted_logits1 = None
+                corrupted_logits2 = None
+                cpu_cache = None
+                
+                print(f"  Trial {trial+1}/{num_trials}")
+                
+                # Track tensors in each cycle to identify leaks
+                log_gpu_memory(f"Before trial {trial} (trans={trans})")
+                
+                # Skip longer transitions that are likely to cause OOM
+                if trans > 50 and torch.cuda.memory_allocated() > 10 * (1024**3):  # Skip if >10GB already used
+                    print(f"Skipping transition {trans} as memory usage is already high")
+                    break
                 
                 # Populate the set of actions and states used to make the DFA
                 states = random.sample(string.ascii_lowercase, 2)
@@ -281,74 +398,184 @@ class EvaluationPipeline:
 
                 prompt = ' '.join([initial_transition.format(x1=start_state, A1=A1, A2=A2, x2=second_state), multi_noop_buffer, final_action.format(A1=A1)])
                 counterfactual_prompt = ' '.join([initial_transition.format(x1=second_state, A1=A2, A2=A1, x2=start_state), counterfactual_multi_noop_buffer, final_action.format(A1=A2)])
-                with torch.no_grad():
-                    tokens = self.model.to_tokens([prompt, counterfactual_prompt], prepend_bos=True).to("cuda")
-                    logits, cache = self.model.run_with_cache(tokens, return_type="logits")
+                
+                # Initialize variables to None to avoid UnboundLocalError - keeping this for backward compatibility
+                cache1 = None
+                logits1 = None
+                logits2 = None
+                corrupted_logits1 = None
+                corrupted_logits2 = None
+                cpu_cache = None
+                
+                try:
+                    with torch.no_grad():
+                        # Process one prompt at a time instead of batching
+                        torch.cuda.empty_cache()
+                        log_gpu_memory("Before first prompt")
+                        
+                        tokens1 = self.model.to_tokens([prompt], prepend_bos=True).to("cuda")
+                        logits1, cache1 = self.model.run_with_cache(tokens1, return_type="logits")
+                        
+                        log_gpu_memory("After first prompt")
+                        
+                        # Process second prompt
+                        torch.cuda.empty_cache()
+                        tokens2 = self.model.to_tokens([counterfactual_prompt], prepend_bos=True).to("cuda")
+                        logits2, _ = self.model.run_with_cache(tokens2, return_type="logits")
 
+                        log_gpu_memory("After second prompt")
 
-                    answers = [(f" {second_state}", f" {start_state}"), (f" {start_state}", f" {second_state}")]
-                    answer_tokens = []
-                    for a in answers:
-                        answer_tokens.append((self.model.to_single_token(a[0]), self.model.to_single_token(a[1]),))
+                        answers = [(f" {second_state}", f" {start_state}"), (f" {start_state}", f" {second_state}")]
+                        answer_tokens = []
+                        for a in answers:
+                            answer_tokens.append((self.model.to_single_token(a[0]), self.model.to_single_token(a[1]),))
 
-                    logit_diff = ((logits[0, -1, answer_tokens[0][0]]-logits[0, -1, answer_tokens[0][1]]) + (logits[1, -1, answer_tokens[1][0]]-logits[1, -1, answer_tokens[1][1]]))/ 2    
+                        # Calculate logit differences separately
+                        logit_diff1 = logits1[0, -1, answer_tokens[0][0]] - logits1[0, -1, answer_tokens[0][1]]
+                        logit_diff2 = logits2[0, -1, answer_tokens[1][0]] - logits2[0, -1, answer_tokens[1][1]]
+                        logit_diff = (logit_diff1 + logit_diff2) / 2
+                        
+                        # Record accuracy and logit diff early to avoid UnboundLocalError
+                        mean_accuracy.append((torch.argmax(logits1[0,-1,:]) == answer_tokens[0][0]).item())
+                        mean_accuracy.append((torch.argmax(logits2[0,-1,:]) == answer_tokens[1][0]).item())
+                        mean_logit_diff.append(logit_diff.item())
+                        
+                        # Only attempt heatmap generation for smaller sequences
+                        if random.random() >= 0.5 and saved_samples > 0 and trans <= 50:
+                            log_gpu_memory("Before corrupted prompts")
+                            
+                            # Process corrupted tokens one at a time
+                            torch.cuda.empty_cache()
+                            corrupted_tokens1 = self.model.to_tokens([counterfactual_prompt], prepend_bos=True).to("cuda")
+                            corrupted_logits1, _ = self.model.run_with_cache(corrupted_tokens1, return_type="logits")
+                            
+                            torch.cuda.empty_cache()
+                            corrupted_tokens2 = self.model.to_tokens([prompt], prepend_bos=True).to("cuda")
+                            corrupted_logits2, _ = self.model.run_with_cache(corrupted_tokens2, return_type="logits")
+                            
+                            log_gpu_memory("After corrupted prompts")
+                            
+                            # Calculate corrupted logit diff
+                            corrupted_logit_diff1 = corrupted_logits1[0, -1, answer_tokens[0][0]] - corrupted_logits1[0, -1, answer_tokens[0][1]]
+                            corrupted_logit_diff2 = corrupted_logits2[0, -1, answer_tokens[1][0]] - corrupted_logits2[0, -1, answer_tokens[1][1]]
+                            corrupted_logit_diff = (corrupted_logit_diff1 + corrupted_logit_diff2) / 2
+                            
+                            # Move cache to CPU to save GPU memory - in smaller chunks
+                            cpu_cache = {}
+                            for k, v in cache1.items():
+                                if isinstance(v, torch.Tensor):
+                                    cpu_cache[k] = v.cpu()
+                                    # Free GPU memory immediately
+                                    del v
+                                else:
+                                    cpu_cache[k] = v
+                            
+                            # Delete original cache after copying to CPU
+                            del cache1
+                            torch.cuda.empty_cache()
+                            
+                            # Create combined tensors for heatmap
+                            combined_tokens = torch.cat([tokens1, tokens2], dim=0)
+                            combined_corrupted = torch.cat([corrupted_tokens1, corrupted_tokens2], dim=0)
+                            
+                            log_gpu_memory("Before heatmap generation")
+                            
+                            compressed_sequence = ','.join(parse_states_and_actions(prompt=prompt))
+
+                            self.create_patching_heatmap(
+                                regular_tokens=combined_tokens, 
+                                compressed_sequence=compressed_sequence, 
+                                cache=cpu_cache, 
+                                corrupted_tokens=combined_corrupted, 
+                                answer_tokens=answer_tokens, 
+                                corrupted_average_logit_diff=corrupted_logit_diff, 
+                                original_average_logit_diff=logit_diff, 
+                                filename=os.path.join(Config.BASE_PATH, 'dfa_stateaction', f'noop_logitdiff_heatmap_{trans}trans.png')
+                            )
+                            
+                            log_gpu_memory("After heatmap generation")
+                            saved_samples -= 1
+                except Exception as e:
+                    print(f"ERROR in processing trial {trial} (trans={trans}): {e}")
+                finally:
+                    # Clean up memory explicitly - use safer dict-based approach to check variables
+                    local_vars = locals()
+                    for var_name in ['cache1', 'logits1', 'logits2', 'cpu_cache', 'corrupted_logits1', 'corrupted_logits2']:
+                        if var_name in local_vars and local_vars[var_name] is not None:
+                            del local_vars[var_name]
                     
-                    if random.random() >= 0.5 and saved_samples > 0:
-                        corrupted_tokens = self.model.to_tokens([counterfactual_prompt, prompt], prepend_bos=True).to("cuda")
-                        corrupted_logits, __ = self.model.run_with_cache(corrupted_tokens, return_type="logits")
-
-                        corrupted_logit_diff = ((corrupted_logits[0, -1, answer_tokens[0][0]]-corrupted_logits[0, -1, answer_tokens[0][1]]) + (corrupted_logits[1, -1, answer_tokens[1][0]]-corrupted_logits[1, -1, answer_tokens[1][1]]))/ 2    
-
-                        compressed_sequence = ','.join(parse_states_and_actions(prompt=prompt))
-
-                        self.create_patching_heatmap(regular_tokens=tokens, compressed_sequence=compressed_sequence, cache=cache, corrupted_tokens=corrupted_tokens, answer_tokens=answer_tokens, corrupted_average_logit_diff=corrupted_logit_diff, original_average_logit_diff=logit_diff, filename=os.path.join(Config.BASE_PATH, 'dfa_stateaction', f'noop_logitdiff_heatmap_{trans}trans.png'))
-
-
-                        saved_samples -= 1
-                    del cache
-                torch.cuda.empty_cache()
-                torch.cuda.ipc_collect()
-                gc.collect()
-                self.model.reset_hooks()
-                mean_accuracy.append((torch.argmax(logits[0,-1,:])==answer_tokens[0][0]).item())
-                mean_accuracy.append((torch.argmax(logits[1,-1,:])==answer_tokens[1][0]).item())
-                mean_logit_diff.append(logit_diff.item())
+                    # Clean up any other large tensors
+                    for name in list(locals()):
+                        if name.startswith('tokens') or name.startswith('corrupted_tokens'):
+                            if name in locals() and locals()[name] is not None:
+                                del locals()[name]
+                    
+                    torch.cuda.empty_cache()
+                    torch.cuda.ipc_collect()
+                    gc.collect()
+                    
+                    self.model.reset_hooks()
+                    
+                    # Check for any lingering tensors
+                    log_gpu_memory("After cleanup")
+                
+                # Check for memory leaks between trials
+                if trial % 2 == 1:  # Check every other trial
+                    check_for_memory_leaks()
             
-            mean_accuracies.append(np.mean(mean_accuracy))
-            mean_logit_diffs.append(np.mean(mean_logit_diff))
-            std_logit_diffs.append(np.std(mean_logit_diff))
+            # Continue only if we collected some data for this transition
+            if mean_accuracy and mean_logit_diff:
+                mean_accuracies.append(np.mean(mean_accuracy))
+                mean_logit_diffs.append(np.mean(mean_logit_diff))
+                std_logit_diffs.append(np.std(mean_logit_diff))
+            else:
+                # Placeholder values if we skipped this transition
+                mean_accuracies.append(float('nan'))
+                mean_logit_diffs.append(float('nan'))
+                std_logit_diffs.append(float('nan'))
+            
+            # Check memory after each transition setting
+            log_gpu_memory(f"After transition {trans}", show_tensors=True, reset_max=True)
         
-        '''
-        PLOT 4: Plot the mean logit diffs chart as number of transitions increase
-        '''
-        mean_logit_diffs = np.array(mean_logit_diffs)
-        std_logit_diffs = np.array(std_logit_diffs)
-        plt.plot(num_transitions, mean_logit_diffs, label='Mean Logit Diff')
-        plt.fill_between(
-            num_transitions,
-            mean_logit_diffs - std_logit_diffs,
-            mean_logit_diffs + std_logit_diffs,
-            color='blue',
-            alpha=0.2,
-            label='Std Dev'
-        )
-        plt.xlabel('Number of Transitions')
-        plt.ylabel('Mean Logit Differences')
-        plt.title('Plot of Mean Logit Differences vs. Number of Transitions')
-        # Save the figure
-        plt.savefig(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'noop_logitdiff.png'))
-        plt.cla()
-        plt.clf()
+        # Clean non-NaN values for plotting
+        valid_indices = ~np.isnan(np.array(mean_logit_diffs))
+        plot_transitions = np.array(num_transitions)[valid_indices]
+        plot_mean_logit_diffs = np.array(mean_logit_diffs)[valid_indices]
+        plot_std_logit_diffs = np.array(std_logit_diffs)[valid_indices]
+        plot_mean_accuracies = np.array(mean_accuracies)[valid_indices]
+        
+        if len(plot_transitions) > 0:
+            '''
+            PLOT 4: Plot the mean logit diffs chart as number of transitions increase
+            '''
+            plt.plot(plot_transitions, plot_mean_logit_diffs, label='Mean Logit Diff')
+            plt.fill_between(
+                plot_transitions,
+                plot_mean_logit_diffs - plot_std_logit_diffs,
+                plot_mean_logit_diffs + plot_std_logit_diffs,
+                color='blue',
+                alpha=0.2,
+                label='Std Dev'
+            )
+            plt.xlabel('Number of Transitions')
+            plt.ylabel('Mean Logit Differences')
+            plt.title('Plot of Mean Logit Differences vs. Number of Transitions')
+            # Save the figure
+            plt.savefig(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'noop_logitdiff.png'))
+            plt.cla()
+            plt.clf()
 
-        mean_accuracies = np.array(mean_accuracies)
-        plt.plot(num_transitions, mean_accuracies, label='Mean Accuracy')
-        plt.xlabel('Number of Transitions')
-        plt.ylabel('Mean Accuracy')
-        plt.title('Plot of Mean Accuracy vs. Number of Transitions')
-        # Save the figure
-        plt.savefig(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'noop_accuracy.png'))
-        plt.cla()
-        plt.clf()
+            plt.plot(plot_transitions, plot_mean_accuracies, label='Mean Accuracy')
+            plt.xlabel('Number of Transitions')
+            plt.ylabel('Mean Accuracy')
+            plt.title('Plot of Mean Accuracy vs. Number of Transitions')
+            # Save the figure
+            plt.savefig(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'noop_accuracy.png'))
+            plt.cla()
+            plt.clf()
+        
+        # Final memory check
+        log_gpu_memory("End of evaluate_noop_dfa", show_tensors=True)
 
         return mean_logit_diffs
     
@@ -819,17 +1046,37 @@ def evaluate_random_sequence(model_name:str, num_samples:int, init_states:list, 
 
     np.savez(os.path.join(Config.BASE_PATH, 'random', 'accuracy_random_letter.npz'), array=accuracy_heatmap)
 
-def parse_states_and_actions(prompt: str):
-    # Regular expression patterns to match states and actions
-    pattern = r'state (\w+)|action (\w+)'  # Matches 'state x1', 'action A1', etc.
-
-    # Find all matches for states and actions
-    matches = re.findall(pattern, prompt)
-
-    # Flatten the list of tuples and filter out empty strings
-    ordered_elements = [item for sublist in matches for item in sublist if item]
-
-    return ordered_elements
+def parse_states_and_actions(prompt):
+    """Extract states and actions from the prompt string in a robust way."""
+    sequence = []
+    pieces = prompt.split('. ')
+    
+    for p in pieces:
+        # Handle "Start at state X" format
+        if 'Start at state' in p:
+            try:
+                state = p.split('state ')[1]
+                sequence.append(state)
+            except IndexError:
+                continue
+        
+        # Handle "Take action X, go to state Y" format
+        elif 'Take action' in p:
+            try:
+                parts = p.split(', ')
+                # Extract action
+                if 'action ' in parts[0]:
+                    action = parts[0].split('action ')[1]
+                    sequence.append(action)
+                
+                # Extract state if available
+                if len(parts) > 1 and 'state ' in parts[1]:
+                    state = parts[1].split('state ')[1]
+                    sequence.append(state)
+            except IndexError:
+                continue
+    
+    return sequence
 
 # Example usage
 # prompt = "Start at state x1. Take action A1, go to state x2. Take action A2, go to state x1."

@@ -2,13 +2,13 @@ import os
 from dotenv import load_dotenv
 
 load_dotenv()
-hf_key = os.getenv("HF_KEY")
+hf_key = os.getenv("HF_TOKEN")
 os.environ["HF_TOKEN"] = hf_key
 
 class Config:
     #base arguments overriden in evaluate_model.py
     reduce_states = True
-    model_name = 'gpt2-large'
+    model_name = 'meta-llama/Llama-3.2-1B'
     BASE_PATH = None
 
     #num states range
@@ -32,7 +32,8 @@ class Config:
     diff_state_same_action_transitions = [6, 10, 14, 18, 22, 26, 30]
     diff_state_same_action_trials = 5
 
-    noop_transitions = [1, 5, 10, 20, 40, 50, 80, 100]
-    noop_trials = 5
+    # noop_transitions = [1, 5, 10, 20, 40, 50, 80, 100]
+    noop_transitions = [1, 5, 10, 20, 40, 50]
+    noop_trials = 1
 
     epsilon = 1e-20
