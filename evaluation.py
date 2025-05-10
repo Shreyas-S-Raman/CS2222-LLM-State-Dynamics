@@ -311,120 +311,145 @@ class EvaluationPipeline:
         return patched_heads_average
 
     def evaluate_noop_dfa(self, num_transitions: list[int], num_trials: int, num_saved_samples: int):
-        #NOTE: large number of transitions e.g. 10, 20, 40, 50, 80, 100
         initial_transition = "Start at state {x1}. Take action {A1}, go to state {x2}. Take action {A2}, go to state {x1}. Take action {A1}, go to state {x2}."
         noop_buffer = "Take action {A}, go to state {x}."
-        final_action = "Take action {A2}, go to state" 
+        final_action = "Take action {A2}, go to state"
 
-        mean_logit_diffs = []
-        std_logit_diffs = []
-        mean_accuracies = []
+        mean_logit_diffs, std_logit_diffs, mean_accuracies = [], [], []
 
         n_heads = self.model.cfg.n_heads
         n_layers = self.model.cfg.n_layers
         patched_heads_average = np.zeros((n_layers, n_heads))
 
         for trans in num_transitions:
-            mean_logit_diff = []
+            logit_diffs_per_trial = []
+            accuracies_per_trial = []
             saved_samples = num_saved_samples
-            mean_accuracy = []
+
             for _ in range(num_trials):
-                
-                # Populate the set of actions and states used to make the DFA
                 states = random.sample(string.ascii_lowercase, 3)
                 actions = random.sample(string.ascii_uppercase, 2)
                 noop_action_set = set(string.ascii_uppercase) - set(actions)
-                
-                #set all variables initially
-                clean_state = states[0]
-                counterfact_state = states[1]
-                noop_state = states[2]
-                
-                transition_to_noop = actions[0]
-                transition_to_org = actions[1]
 
-                random_action = random.sample(noop_action_set,1)[0]
-                multi_noop_buffer = [noop_buffer.format(A=random_action, x=noop_state)]*(trans-3)
-                multi_noop_buffer = ' '.join(multi_noop_buffer)
+                clean_state, counterfact_state, noop_state = states
+                transition_to_noop, transition_to_org = actions
 
-                prompt = ' '.join([initial_transition.format(x1=clean_state, A1=transition_to_noop, x2=noop_state, A2=transition_to_org), multi_noop_buffer, final_action.format(A2 = transition_to_org)])
-                counterfactual_prompt = ' '.join([initial_transition.format(x1=counterfact_state, A1=transition_to_noop, x2=noop_state, A2=transition_to_org), multi_noop_buffer, final_action.format(A2=transition_to_org)])
-                with torch.no_grad():
-                    tokens = self.model.to_tokens([prompt, counterfactual_prompt], prepend_bos=True).to("cuda")
+                random_action = random.sample(noop_action_set, 1)[0]
+                multi_noop_buffer = ' '.join([noop_buffer.format(A=random_action, x=noop_state)] * (trans - 3))
+
+                prompt = ' '.join([
+                    initial_transition.format(x1=clean_state, A1=transition_to_noop, x2=noop_state, A2=transition_to_org),
+                    multi_noop_buffer,
+                    final_action.format(A2=transition_to_org)
+                ])
+                counterfactual_prompt = ' '.join([
+                    initial_transition.format(x1=counterfact_state, A1=transition_to_noop, x2=noop_state, A2=transition_to_org),
+                    multi_noop_buffer,
+                    final_action.format(A2=transition_to_org)
+                ])
+
+                with torch.inference_mode():
+                    tokens = self.model.to_tokens([prompt, counterfactual_prompt], prepend_bos=True).to("cuda", non_blocking=True)
                     logits, cache = self.model.run_with_cache(tokens, return_type="logits")
 
-
                     answers = [(f" {clean_state}", f" {counterfact_state}"), (f" {counterfact_state}", f" {clean_state}")]
-                    answer_tokens = []
-                    for a in answers:
-                        answer_tokens.append((self.model.to_single_token(a[0]), self.model.to_single_token(a[1]),))
+                    answer_tokens = [
+                        (self.model.to_single_token(a[0]), self.model.to_single_token(a[1]))
+                        for a in answers
+                    ]
 
-                    logit_diff = ((logits[0, -1, answer_tokens[0][0]]-logits[0, -1, answer_tokens[0][1]]) + (logits[1, -1, answer_tokens[1][0]]-logits[1, -1, answer_tokens[1][1]]))/ 2    
-                    
+                    logit_diff = (
+                        (logits[0, -1, answer_tokens[0][0]] - logits[0, -1, answer_tokens[0][1]]) +
+                        (logits[1, -1, answer_tokens[1][0]] - logits[1, -1, answer_tokens[1][1]])
+                    ) / 2
+
+                    # Move scalar result to CPU early
+                    logit_diff_value = logit_diff.item()
+                    logit_diffs_per_trial.append(logit_diff_value)
+
+                    accuracies_per_trial.append((torch.argmax(logits[0, -1, :]) == answer_tokens[0][0]).item())
+                    accuracies_per_trial.append((torch.argmax(logits[1, -1, :]) == answer_tokens[1][0]).item())
+
+                    del logits  # free up memory quickly
+
                     if random.random() >= 0.5 and saved_samples > 0:
-                        corrupted_tokens = self.model.to_tokens([counterfactual_prompt, prompt], prepend_bos=True).to("cuda")
-                        corrupted_logits, __ = self.model.run_with_cache(corrupted_tokens, return_type="logits")
+                        corrupted_tokens = self.model.to_tokens(
+                            [counterfactual_prompt, prompt], prepend_bos=True
+                        ).to("cuda", non_blocking=True)
+                        corrupted_logits, _ = self.model.run_with_cache(corrupted_tokens, return_type="logits")
 
-                        corrupted_logit_diff = ((corrupted_logits[0, -1, answer_tokens[0][0]]-corrupted_logits[0, -1, answer_tokens[0][1]]) + (corrupted_logits[1, -1, answer_tokens[1][0]]-corrupted_logits[1, -1, answer_tokens[1][1]]))/ 2    
+                        corrupted_logit_diff = (
+                            (corrupted_logits[0, -1, answer_tokens[0][0]] - corrupted_logits[0, -1, answer_tokens[0][1]]) +
+                            (corrupted_logits[1, -1, answer_tokens[1][0]] - corrupted_logits[1, -1, answer_tokens[1][1]])
+                        ) / 2
 
                         compressed_sequence = ','.join(parse_states_and_actions(prompt=prompt))
+                        # Immediately free after use
+                        self.create_token_patching_heatmap(
+                            regular_tokens=tokens,
+                            compressed_sequence=compressed_sequence,
+                            cache=cache,
+                            corrupted_tokens=corrupted_tokens,
+                            answer_tokens=answer_tokens,
+                            corrupted_average_logit_diff=corrupted_logit_diff,
+                            original_average_logit_diff=logit_diff,
+                            filename=os.path.join(Config.BASE_PATH, 'dfa_stateaction', f'noop_logitdiff_token_heatmap_{trans}trans.png')
+                        )
+                        patched_heads_average = self.create_head_patching_heatmap(
+                            patched_heads_average=patched_heads_average,
+                            num_samples=len(num_transitions),
+                            regular_tokens=tokens,
+                            compressed_sequence=compressed_sequence,
+                            cache=cache,
+                            corrupted_tokens=corrupted_tokens,
+                            answer_tokens=answer_tokens,
+                            corrupted_average_logit_diff=corrupted_logit_diff,
+                            original_average_logit_diff=logit_diff,
+                            filename=os.path.join(Config.BASE_PATH, 'dfa_stateaction', f'noop_logitdiff_head_heatmap.png')
+                        )
 
-                        self.create_token_patching_heatmap(regular_tokens=tokens, compressed_sequence=compressed_sequence, cache=cache, corrupted_tokens=corrupted_tokens, answer_tokens=answer_tokens, corrupted_average_logit_diff=corrupted_logit_diff, original_average_logit_diff=logit_diff, filename=os.path.join(Config.BASE_PATH, 'dfa_stateaction', f'noop_logitdiff_token_heatmap_{trans}trans.png'))
-                        patched_heads_average = self.create_head_patching_heatmap(patched_heads_average=patched_heads_average, num_samples=len(num_transitions), regular_tokens=tokens, compressed_sequence=compressed_sequence, cache=cache, corrupted_tokens=corrupted_tokens, answer_tokens=answer_tokens, corrupted_average_logit_diff=corrupted_logit_diff, original_average_logit_diff=logit_diff, filename=os.path.join(Config.BASE_PATH, 'dfa_stateaction', f'noop_logitdiff_head_heatmap.png'))
-                        
-
+                        del corrupted_tokens, corrupted_logits  # free after patching
                         saved_samples -= 1
-                    del cache
+
+                del tokens, cache
                 torch.cuda.empty_cache()
                 torch.cuda.ipc_collect()
                 gc.collect()
                 self.model.reset_hooks()
-                mean_accuracy.append((torch.argmax(logits[0,-1,:])==answer_tokens[0][0]).item())
-                mean_accuracy.append((torch.argmax(logits[1,-1,:])==answer_tokens[1][0]).item())
-                mean_logit_diff.append(logit_diff.item())
-            
-            mean_accuracies.append(np.mean(mean_accuracy))
-            mean_logit_diffs.append(np.mean(mean_logit_diff))
-            std_logit_diffs.append(np.std(mean_logit_diff))
-        
-        '''
-        PLOT 4: Plot the mean logit diffs chart as number of transitions increase
-        '''
-        mean_logit_diffs = np.array(mean_logit_diffs)
-        std_logit_diffs = np.array(std_logit_diffs)
-        plt.plot(num_transitions, mean_logit_diffs, label='Mean Logit Diff')
-        plt.fill_between(
+
+            mean_accuracies.append(np.mean(accuracies_per_trial))
+            mean_logit_diffs.append(np.mean(logit_diffs_per_trial))
+            std_logit_diffs.append(np.std(logit_diffs_per_trial))
+
+        # Plot and fully close figure
+        fig, ax = plt.subplots()
+        ax.plot(num_transitions, mean_logit_diffs, label='Mean Logit Diff')
+        ax.fill_between(
             num_transitions,
-            mean_logit_diffs - std_logit_diffs,
-            mean_logit_diffs + std_logit_diffs,
-            color='blue',
-            alpha=0.2,
-            label='Std Dev'
+            np.array(mean_logit_diffs) - np.array(std_logit_diffs),
+            np.array(mean_logit_diffs) + np.array(std_logit_diffs),
+            color='blue', alpha=0.2, label='Std Dev'
         )
-        plt.xlabel('Number of Transitions')
-        plt.ylabel('Mean Logit Differences')
-        plt.title('Plot of Mean Logit Differences vs. Number of Transitions')
-        # Save the figure
-        plt.savefig(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'noop_logitdiff.png'))
-        plt.cla()
-        plt.clf()
+        ax.set_xlabel('Number of Transitions')
+        ax.set_ylabel('Mean Logit Differences')
+        ax.set_title('Plot of Mean Logit Differences vs. Number of Transitions')
+        fig.savefig(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'noop_logitdiff.png'))
+        plt.close(fig)
 
-        mean_accuracies = np.array(mean_accuracies)
-        plt.plot(num_transitions, mean_accuracies, label='Mean Accuracy')
-        plt.xlabel('Number of Transitions')
-        plt.ylabel('Mean Accuracy')
-        plt.title('Plot of Mean Accuracy vs. Number of Transitions')
-        # Save the figure
-        plt.savefig(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'noop_accuracy.png'))
-        plt.cla()
-        plt.clf()
+        fig, ax = plt.subplots()
+        ax.plot(num_transitions, mean_accuracies, label='Mean Accuracy')
+        ax.set_xlabel('Number of Transitions')
+        ax.set_ylabel('Mean Accuracy')
+        ax.set_title('Plot of Mean Accuracy vs. Number of Transitions')
+        fig.savefig(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'noop_accuracy.png'))
+        plt.close(fig)
 
-        return mean_logit_diffs
+        return np.array(mean_logit_diffs)
     
     def evaluate_diff_state_same_action(self, num_transitions: list[int], num_trials: int, num_saved_samples: int):
-        #NOTE: small number of transitions e.g. 6, 10, 14, 18, 22, 26, 30
+        # Ensure transitions are valid upfront
         for t in num_transitions:
-            assert t%4 == 2, "num_transitions has to give remainder 2 when div by 4"
+            assert t % 4 == 2, "num_transitions has to give remainder 2 when div by 4"
 
         init_state = "Start at state {x1}."
         target_loop = "Take action {A1}, go to state {x3}. Take action {A2}, go to state {x1}."
@@ -433,104 +458,134 @@ class EvaluationPipeline:
         transition_to_target_loop = "Take action {A1}, go to state {x4}. Take action {A3}, go to state {x1}."
         final_action = "Take action {A1}, go to state"
 
-        mean_accuracies = []
-        mean_logit_diffs = []
-        std_logit_diffs = []
+        mean_accuracies, mean_logit_diffs, std_logit_diffs = [], [], []
 
         n_heads = self.model.cfg.n_heads
         n_layers = self.model.cfg.n_layers
         patched_heads_average = np.zeros((n_layers, n_heads))
 
         for trans in num_transitions:
-            mean_logit_diff = []
-            mean_accuracy = []
+            logit_diffs_per_trial = []
+            accuracies_per_trial = []
             saved_samples = num_saved_samples
+
             for _ in range(num_trials):
-                
-                # Populate the set of actions and states used to make the DFA
+                # Sample states and actions
                 states = random.sample(string.ascii_lowercase, 4)
                 actions = random.sample(string.ascii_uppercase, 3)
-                
-                #set all variables initially
-                x1 = states[0]
-                x2 = states[1]
-                x3 = states[2]
-                x4 = states[3]
-                A1 = actions[0]
-                A2 = actions[1]
-                A3 = actions[2]
 
-                prompt = [init_state.format(x1=x1)]
-                counterfactual_prompt = [init_state.format(x1=x1)]
+                x1, x2, x3, x4 = states
+                A1, A2, A3 = actions
+
+                # Build prompts efficiently
+                prompt_parts = [init_state.format(x1=x1)]
+                counterfactual_parts = [init_state.format(x1=x1)]
+
                 for i in range(0, trans, 2):
-                    
-                    if (i//2) % 4 == 0:
-                        #0, 8 -> 0, 4
-                        prompt.append(target_loop.format(x1=x1, A1=A1, x3=x3, A2=A2))
-                        counterfactual_prompt.append(target_loop.format(x1=x1, A1=A1, x3=x3, A2=A2))
+                    section = (i // 2) % 4
+                    if section == 0:
+                        prompt_parts.append(target_loop.format(x1=x1, A1=A1, x3=x3, A2=A2))
+                        counterfactual_parts.append(target_loop.format(x1=x1, A1=A1, x3=x3, A2=A2))
                         regular_label = (f" {x3}", f" {x4}")
-                    if (i//2) % 4 == 1:
-                        #2, 10 -> 1, 5
-                        prompt.append(transition_to_distractor_loop.format(A3=A3, A1=A1, x3=x3, x2=x2))
-                        counterfactual_prompt.append(transition_to_distractor_loop.format(A3=A3, A1=A1, x3=x3, x2=x1))
-                    if (i//2) % 4 == 2:
-                        #4, 12 -> 2, 6
-                        prompt.append(distractor_loop.format(x4=x4, A1=A1, x2=x2, A2=A2))
-                        counterfactual_prompt.append(distractor_loop.format(x4=x3, A1=A1, x2=x1, A2=A2))
+                    elif section == 1:
+                        prompt_parts.append(transition_to_distractor_loop.format(A3=A3, A1=A1, x3=x3, x2=x2))
+                        counterfactual_parts.append(transition_to_distractor_loop.format(A3=A3, A1=A1, x3=x3, x2=x1))
+                    elif section == 2:
+                        prompt_parts.append(distractor_loop.format(x4=x4, A1=A1, x2=x2, A2=A2))
+                        counterfactual_parts.append(distractor_loop.format(x4=x3, A1=A1, x2=x1, A2=A2))
                         regular_label = (f" {x4}", f" {x3}")
-                    if (i//2) % 4 == 3:
-                        #6, 14 -> 3, 7
-                        prompt.append(transition_to_target_loop.format(A3=A3, A1=A1, x4=x4, x1=x1))
-                        counterfactual_prompt.append(transition_to_target_loop.format(A3=A3, A1=A1, x4=x3, x1=x1))
+                    elif section == 3:
+                        prompt_parts.append(transition_to_target_loop.format(A3=A3, A1=A1, x4=x4, x1=x1))
+                        counterfactual_parts.append(transition_to_target_loop.format(A3=A3, A1=A1, x4=x3, x1=x1))
 
-                prompt = ' '.join(prompt + [final_action.format(A1=A1)])
-                counterfactual_prompt = ' '.join(counterfactual_prompt + [final_action.format(A1=A1)])
-                with torch.no_grad():
-                    tokens = self.model.to_tokens([prompt, counterfactual_prompt], prepend_bos=True).to("cuda")
+                prompt = ' '.join(prompt_parts + [final_action.format(A1=A1)])
+                counterfactual_prompt = ' '.join(counterfactual_parts + [final_action.format(A1=A1)])
+
+                with torch.inference_mode():
+                    tokens = self.model.to_tokens([prompt, counterfactual_prompt], prepend_bos=True).to("cuda", non_blocking=True)
                     logits, cache = self.model.run_with_cache(tokens, return_type="logits")
 
                     answers = [regular_label, (f" {x3}", f" {x4}")]
-                    answer_tokens = []
-                    for a in answers:
-                        answer_tokens.append((self.model.to_single_token(a[0]), self.model.to_single_token(a[1]),))
-                    logit_diff = ((logits[0, -1, answer_tokens[0][0]]-logits[0, -1, answer_tokens[0][1]]) + (logits[1, -1, answer_tokens[1][0]]-logits[1, -1, answer_tokens[1][1]]))/ 2    
-                    
-                    if random.random() >= 0.5 and saved_samples > 0:
-                        corrupted_tokens = self.model.to_tokens([counterfactual_prompt, prompt], prepend_bos=True).to("cuda")
-                        corrupted_logits, ___ = self.model.run_with_cache(corrupted_tokens, return_type="logits")
+                    answer_tokens = [
+                        (self.model.to_single_token(a[0]), self.model.to_single_token(a[1]))
+                        for a in answers
+                    ]
 
-                        corrupted_logit_diff = ((corrupted_logits[0, -1, answer_tokens[0][0]]-corrupted_logits[0, -1, answer_tokens[0][1]]) + (corrupted_logits[1, -1, answer_tokens[1][0]]-corrupted_logits[1, -1, answer_tokens[1][1]]))/ 2    
+                    logit_diff = (
+                        (logits[0, -1, answer_tokens[0][0]] - logits[0, -1, answer_tokens[0][1]]) +
+                        (logits[1, -1, answer_tokens[1][0]] - logits[1, -1, answer_tokens[1][1]])
+                    ) / 2
+
+                    # Move scalar to CPU and append early
+                    logit_diff_value = logit_diff.item()
+                    logit_diffs_per_trial.append(logit_diff_value)
+
+                    accuracies_per_trial.append((torch.argmax(logits[0, -1, :]) == answer_tokens[0][0]).item())
+                    # You had commented this out before; keep it commented or enable if needed:
+                    # accuracies_per_trial.append((torch.argmax(logits[1, -1, :]) == answer_tokens[1][0]).item())
+
+                    del logits  # Free logits right after use
+
+                    if random.random() >= 0.5 and saved_samples > 0:
+                        corrupted_tokens = self.model.to_tokens(
+                            [counterfactual_prompt, prompt], prepend_bos=True
+                        ).to("cuda", non_blocking=True)
+                        corrupted_logits, _ = self.model.run_with_cache(corrupted_tokens, return_type="logits")
+
+                        corrupted_logit_diff = (
+                            (corrupted_logits[0, -1, answer_tokens[0][0]] - corrupted_logits[0, -1, answer_tokens[0][1]]) +
+                            (corrupted_logits[1, -1, answer_tokens[1][0]] - corrupted_logits[1, -1, answer_tokens[1][1]])
+                        ) / 2
 
                         compressed_sequence = ','.join(parse_states_and_actions(prompt=prompt))
                         try:
-                            self.create_token_patching_heatmap(regular_tokens = tokens, compressed_sequence=compressed_sequence, cache=cache, corrupted_tokens=corrupted_tokens, answer_tokens=answer_tokens, corrupted_average_logit_diff=corrupted_logit_diff, original_average_logit_diff=logit_diff, filename=os.path.join(Config.BASE_PATH, 'dfa_stateaction', f'diffstate_sameaction_logitdiff_token_heatmap_{trans}trans.png'))
-                            patched_heads_average = self.create_head_patching_heatmap(patched_heads_average=patched_heads_average, num_samples=len(num_transitions), regular_tokens=tokens, compressed_sequence=compressed_sequence, cache=cache, corrupted_tokens=corrupted_tokens, answer_tokens=answer_tokens, corrupted_average_logit_diff=corrupted_logit_diff, original_average_logit_diff=logit_diff, filename=os.path.join(Config.BASE_PATH, 'dfa_stateaction', f'diffstate_sameaction_logitdiff_head_heatmap.png'))
-                        
+                            self.create_token_patching_heatmap(
+                                regular_tokens=tokens,
+                                compressed_sequence=compressed_sequence,
+                                cache=cache,
+                                corrupted_tokens=corrupted_tokens,
+                                answer_tokens=answer_tokens,
+                                corrupted_average_logit_diff=corrupted_logit_diff,
+                                original_average_logit_diff=logit_diff,
+                                filename=os.path.join(Config.BASE_PATH, 'dfa_stateaction',
+                                                    f'diffstate_sameaction_logitdiff_token_heatmap_{trans}trans.png')
+                            )
+                            patched_heads_average = self.create_head_patching_heatmap(
+                                patched_heads_average=patched_heads_average,
+                                num_samples=len(num_transitions),
+                                regular_tokens=tokens,
+                                compressed_sequence=compressed_sequence,
+                                cache=cache,
+                                corrupted_tokens=corrupted_tokens,
+                                answer_tokens=answer_tokens,
+                                corrupted_average_logit_diff=corrupted_logit_diff,
+                                original_average_logit_diff=logit_diff,
+                                filename=os.path.join(Config.BASE_PATH, 'dfa_stateaction',
+                                                    f'diffstate_sameaction_logitdiff_head_heatmap.png')
+                            )
                         except Exception as e:
                             print(f"ERROR: {e}")
                             pdb.set_trace()
-            
 
+                        del corrupted_tokens, corrupted_logits
                         saved_samples -= 1
-                    del cache
+
+                del tokens, cache
                 torch.cuda.empty_cache()
                 torch.cuda.ipc_collect()
                 gc.collect()
                 self.model.reset_hooks()
-                mean_accuracy.append((torch.argmax(logits[0,-1,:])==answer_tokens[0][0]).item())
-                # mean_accuracy.append((torch.argmax(logits[1,-1,:])==answer_tokens[1][0]).item())
-                mean_logit_diff.append(logit_diff.item())
-            mean_accuracies.append(np.mean(mean_accuracy))
-            mean_logit_diffs.append(np.mean(mean_logit_diff))
-            std_logit_diffs.append(np.std(mean_logit_diff))
 
-        '''
-        PLOT 4: Plot the mean logit diffs chart as number of transitions increase
-        '''
-        mean_logit_diff = np.array(mean_logit_diff)
+            mean_accuracies.append(np.mean(accuracies_per_trial))
+            mean_logit_diffs.append(np.mean(logit_diffs_per_trial))
+            std_logit_diffs.append(np.std(logit_diffs_per_trial))
+
+        # Plot logit diffs
+        fig, ax = plt.subplots()
+        mean_logit_diffs = np.array(mean_logit_diffs)
         std_logit_diffs = np.array(std_logit_diffs)
-        plt.plot(num_transitions, mean_logit_diffs, label='Mean Logit Diff')
-        plt.fill_between(
+        ax.plot(num_transitions, mean_logit_diffs, label='Mean Logit Diff')
+        ax.fill_between(
             num_transitions,
             mean_logit_diffs - std_logit_diffs,
             mean_logit_diffs + std_logit_diffs,
@@ -538,25 +593,23 @@ class EvaluationPipeline:
             alpha=0.2,
             label='Std Dev'
         )
-        plt.xlabel('Number of Transitions')
-        plt.ylabel('Mean Logit Differences')
-        plt.title('Plot of Mean Logit Differences vs. Number of Transitions')
-        # Save the figure
-        plt.savefig(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'diff_state_same_action_logitdiff.png'))
-        plt.cla()
-        plt.clf()
+        ax.set_xlabel('Number of Transitions')
+        ax.set_ylabel('Mean Logit Differences')
+        ax.set_title('Plot of Mean Logit Differences vs. Number of Transitions')
+        fig.savefig(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'diff_state_same_action_logitdiff.png'))
+        plt.close(fig)
 
+        # Plot accuracy
+        fig, ax = plt.subplots()
         mean_accuracies = np.array(mean_accuracies)
-        plt.plot(num_transitions, mean_accuracies, label='Mean Accuracy')
-        plt.xlabel('Number of Transitions')
-        plt.ylabel('Mean Accuracy')
-        plt.title('Plot of Mean Accuracy vs. Number of Transitions')
-        # Save the figure
-        plt.savefig(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'diff_state_same_action_accuracy.png'))
-        plt.cla()
-        plt.clf()
+        ax.plot(num_transitions, mean_accuracies, label='Mean Accuracy')
+        ax.set_xlabel('Number of Transitions')
+        ax.set_ylabel('Mean Accuracy')
+        ax.set_title('Plot of Mean Accuracy vs. Number of Transitions')
+        fig.savefig(os.path.join(Config.BASE_PATH, 'dfa_stateaction', 'diff_state_same_action_accuracy.png'))
+        plt.close(fig)
 
-        return mean_logit_diffs
+        return np.array(mean_logit_diffs)
 
 
 
@@ -572,9 +625,8 @@ def evaluate_dfa_stateaction_sequence(model_name:str, num_samples:int, init_stat
     eval_pipeline = EvaluationPipeline(model_name=model_name, sequence_generator=None)
 
     # eval_pipeline.evaluate_diff_state_same_action(num_transitions=Config.diff_state_same_action_transitions, num_trials=Config.diff_state_same_action_trials, num_saved_samples=1)
-    eval_pipeline.evaluate_noop_dfa(num_transitions=Config.noop_transitions, num_trials=Config.noop_trials, num_saved_samples=1)
+    # eval_pipeline.evaluate_noop_dfa(num_transitions=Config.noop_transitions, num_trials=Config.noop_trials, num_saved_samples=1)
     
-    exit()
     for i, state in tqdm(enumerate(init_states + list(range(min_states, max_states, state_interval)))):
         for j, trans in enumerate(init_transitions + list(range(min_transitions, max_transitions, transition_interval))):
                 

@@ -8,7 +8,7 @@ os.environ["HF_TOKEN"] = hf_key
 class Config:
     #base arguments overriden in evaluate_model.py
     reduce_states = True
-    model_name = 'gpt2-large'
+    model_name = 'gpt2-xl'
     BASE_PATH = None
 
     #num states range
@@ -32,7 +32,7 @@ class Config:
     diff_state_same_action_transitions = [6, 10, 14, 18, 22, 26, 30]
     diff_state_same_action_trials = 5
 
-    noop_transitions = [1, 5, 10, 20, 40, 50] #[1, 5, 10, 20, 40, 50, 80, 100]
+    noop_transitions = [1, 5, 10, 20, 40] #1, 5, 10, 20, 40, 50, 80, 100
     noop_trials = 5
 
     epsilon = 1e-20
