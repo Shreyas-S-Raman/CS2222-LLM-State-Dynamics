@@ -25,18 +25,18 @@ if __name__ == '__main__':
     if not os.path.exists(Config.BASE_PATH):
         os.mkdir(Config.BASE_PATH)
 
-    evaluate_random_sequence(
-        model_name=Config.model_name, 
-        num_samples=Config.num_samples, 
-        init_states=Config.init_states, 
-        init_transitions=Config.init_transitions, 
-        max_states=Config.max_states, 
-        min_states=Config.min_states, 
-        state_interval=Config.state_interval, 
-        max_transitions=Config.max_transitions, 
-        min_transitions=Config.min_transitions, 
-        transition_interval=Config.transition_interval
-    )
+    # evaluate_random_sequence(
+    #     model_name=Config.model_name, 
+    #     num_samples=Config.num_samples, 
+    #     init_states=Config.init_states, 
+    #     init_transitions=Config.init_transitions, 
+    #     max_states=Config.max_states, 
+    #     min_states=Config.min_states, 
+    #     state_interval=Config.state_interval, 
+    #     max_transitions=Config.max_transitions, 
+    #     min_transitions=Config.min_transitions, 
+    #     transition_interval=Config.transition_interval
+    # )
 
     evaluate_dfa_stateaction_sequence(
         model_name=Config.model_name, 
@@ -53,17 +53,17 @@ if __name__ == '__main__':
         reduce_states=Config.reduce_states
     )
 
-    evaluate_dfa_statestate_sequence(
-        model_name=Config.model_name, 
-        num_samples=Config.num_samples, 
-        init_states=Config.init_states, 
-        init_transitions=Config.init_transitions, 
-        max_states=Config.max_states, 
-        min_states=Config.min_states, 
-        state_interval=Config.state_interval, 
-        max_transitions=Config.max_transitions, 
-        min_transitions=Config.min_transitions, 
-        transition_interval=Config.transition_interval,
-        density_interval=Config.density_interval,
-        reduce_states=Config.reduce_states
-    )
+    # evaluate_dfa_statestate_sequence(
+    #     model_name=Config.model_name, 
+    #     num_samples=Config.num_samples, 
+    #     init_states=Config.init_states, 
+    #     init_transitions=Config.init_transitions, 
+    #     max_states=Config.max_states, 
+    #     min_states=Config.min_states, 
+    #     state_interval=Config.state_interval, 
+    #     max_transitions=Config.max_transitions, 
+    #     min_transitions=Config.min_transitions, 
+    #     transition_interval=Config.transition_interval,
+    #     density_interval=Config.density_interval,
+    #     reduce_states=Config.reduce_states
+    # )
